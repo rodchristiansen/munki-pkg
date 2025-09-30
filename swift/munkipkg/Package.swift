@@ -1,11 +1,11 @@
-// swift-tools-version: 5.4
+// swift-tools-version: 5.5
 
 import PackageDescription
 
 let package = Package(
     name: "munkipkg",
     platforms: [
-        .macOS(.v11) // macOS 11.0 Big Sur minimum for ArgumentParser support
+        .macOS(.v11) // macOS 11.0 Big Sur minimum
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -25,7 +25,10 @@ let package = Package(
         .testTarget(
             name: "munkipkgTests",
             dependencies: ["munkipkg"],
-            path: "munkipkgTests"
+            path: "munkipkgTests",
+            resources: [
+                .copy("fixtures")
+            ]
         ),
     ]
 )

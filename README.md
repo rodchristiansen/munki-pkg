@@ -17,7 +17,7 @@ So why consider using munkipkg? It's simple and self-contained, with no external
 munkipkg is built with Swift and requires:
 
 - **macOS 11.0** or later
-- **Swift 5.4+** (uses Xcode's default Swift version, aligned with Munki v7's approach)
+- **Swift 5.5+** (for async/await support)
 - Standard macOS command-line tools (`pkgbuild`, `productbuild`, etc.)
 
 ## Installation
