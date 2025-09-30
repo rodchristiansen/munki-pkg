@@ -4,43 +4,89 @@
 
 munkipkg is a tool for building packages in a consistent, repeatable manner from source files and scripts in a project directory.
 
-While you can use munkipkg to generate packages for use with Munki (https://www.munki.org/munki/), the packages munkipkg builds are just normal Apple installer packages usable anywhere you can use Apple installer packages.
+While you can use munkipkg to generate packages for use with Munki (https://www.munki.org/munki/), the packages munkipkg builds are standard Apple installer packages usable anywhere you can use Apple installer packages.
 
 Files, scripts, and metadata are stored in a way that is easy to track and manage using a version control system like git.
 
 **autopkg** (https://github.com/autopkg/autopkg) is another tool that has some overlap here. It's definitely possible to use autopkg to build packages from files and scripts on your local disk. See https://managingosx.wordpress.com/2015/07/30/using-autopkg-for-general-purpose-packaging/ and https://github.com/gregneagle/autopkg-packaging-demo for examples on how to do this.
 
-So why consider using munkipkg? It's simple and self-contained, with no external dependencies. It can use JSON or YAML for its build settings file/data, instead of Makefile syntax or XML plists. It does not install a root-level system daemon as does autopkg. It can easily build distribution-style packages and can sign them. Finally, munkipkg can import existing packages.
+So why consider using munkipkg? It's simple and self-contained, with no external dependencies. It can use JSON, YAML, or XML plists for its build settings, providing flexibility in configuration formats. It does not install a root-level system daemon as does autopkg. It can easily build distribution-style packages and can sign them. Finally, munkipkg can import existing packages for easy project migration.
 
-## macOS and Python notes
+## Requirements
 
-munkipkg requires Python. It also uses several command-line tools available on macOS. There is no support for running these on Windows or Linux.
+munkipkg is built with Swift and requires:
 
-In macOS 12.3, Apple removed the Python 2.7 install. Out-of-the-box, there is no Python installed. You'll need to provide your own Python3 to use munkipkg.
+- **macOS 11.0** or later
+- **Swift 5.4+** (uses Xcode's default Swift version, aligned with Munki v7's approach)
+- Standard macOS command-line tools (`pkgbuild`, `productbuild`, etc.)
 
-Some options for providing an appropriate Python:
+## Installation
 
-1) If you also use Munki, use Munki's bundled Python. You could make a symlink at /usr/local/bin/python3 pointing to `/usr/local/munki/munki-python` (this assumes `/usr/local/bin` is in your `PATH`, which it is by default. You could create symlink in any writable directory in your `PATH` if it differs)
-2) Install Python from https://www.python.org. You might still need to create a symlink somewhere so that `/usr/bin/env python3` executes the Python you installed.
-3) Install Apple's Python 3 by running `/usr/bin/python3` and accepting the prompt to install Python (if Xcode or the Xcode Command Line Tools are not already present).
-4) There are other ways to install Python, including Homebrew (https://brew.sh), macadmins-python (https://github.com/macadmins/python), relocatable-python tool (https://github.com/gregneagle/relocatable-python), etc.
+### Pre-built Binary (Recommended)
 
-If you don't want to create a symlink or alter your PATH so that `/usr/bin/env python3` executes an appropriate Python for munkipkg, you can just call munkipkg _from_ the Python of your choice, eg: `/path/to/your/python3 /path/to/munkipkg [options]`
+Download the latest release from the [Releases page](https://github.com/munki/munki-pkg/releases) and place the `munkipkg` binary in your PATH:
 
-## Basic operation
+```bash
+# Download and install (replace with actual release URL)
+curl -L -o munkipkg https://github.com/munki/munki-pkg/releases/latest/download/munkipkg
+chmod +x munkipkg
+sudo mv munkipkg /usr/local/bin/
+```
+
+### Building from Source
+
+If you prefer to build from source or want to contribute to development:
+
+```bash
+# Clone the repository
+git clone https://github.com/munki/munki-pkg.git
+cd munki-pkg/swift/munkipkg
+
+# Build the project
+swift build -c release
+
+# Install system-wide (optional)
+sudo cp .build/release/munkipkg /usr/local/bin/
+```
+
+### Development Setup
+
+For development work:
+
+```bash
+cd swift/munkipkg
+
+# Build debug version
+swift build
+
+# Run tests
+swift test
+
+# Run directly from build
+.build/debug/munkipkg --help
+```
+
+## Basic Operation
 
 munkipkg builds flat packages using Apple's `pkgbuild` and `productbuild` tools.
 
-### Package project directories
+## Package Project Directories
 
-munkipkg builds packages from a "package project directory". At its simplest, a package project directory is a directory containing a "payload" directory, which itself contains the files to be packaged. More typically, the directory also contains a "build-info.plist" file containing specific settings for the build. The package project directory may also contain a "scripts" directory containing any scripts (and, optionally, additional files used by the scripts) to be included in the package.
+munkipkg builds packages from a "package project directory". At its simplest, a package project directory is a directory containing a "payload" directory, which itself contains the files to be packaged. More typically, the directory also contains a "build-info" file containing specific settings for the build. The package project directory may also contain a "scripts" directory containing any scripts (and, optionally, additional files used by the scripts) to be included in the package.
 
 ### Package project directory layout
 ```
 project_dir/
-    build-info.plist
-    payload/
-    scripts/
+    build-info.plist    # Build configuration (or .json/.yaml)
+    payload/            # Files to be installed
+        usr/
+            local/
+                bin/
+                    mytool
+    scripts/          # Installation scripts
+        preinstall
+        postinstall
+    build/            # Output directory (created during build)
 ```
 
 ### Creating a new project
@@ -50,8 +96,7 @@ munkipkg can create an empty package project directory for you:
 `munkipkg --create Foo`
 
 ...will create a new package project directory named "Foo" in the current working directory, complete with a starter build-info.plist, empty payload and scripts directories, and a .gitignore file to cause git to ignore the build/ directory that is created when a project is built.
-
-Once you have a project directory, you simply copy the files you wish to package into the payload directory, and add a preinstall and/or postinstall script to the scripts directory. You may also wish to edit the build-info.plist.
+Once you have a project directory, you simply copy the files you wish to package into the payload directory, and add a preinstall and/or postinstall script to the scripts directory. You may also wish to edit the build-info file.
 
 ### Importing an existing package
 
@@ -71,8 +116,7 @@ This is the central task of munkipkg.
 Causes munkipkg to build the package defined in package_project_directory. The built package is created in a build/ directory inside the project directory.
 
 ### build-info
-
-Build options are stored in a file at the root of the package project. XML plist and JSON formats are supported. YAML is supported if you also install the Python PyYAML module. A build-info file is not strictly required, and a build will use default values if this file is missing.
+Build options are stored in a file at the root of the package project. XML plist, JSON formats, and YAML are all fully supported. A build-info file is not strictly required, and a build will use default values if this file is missing.
 
 XML plist is the default and preferred format. It can represent all the needed macOS data structures. JSON and YAML are also supported, but there is no guarantee that these formats will support future features of munkipkg. (Translation: use XML plist format unless it really, really bothers you; in that case use JSON or YAML but don't come crying to me if you can't use shiny new features with your JSON or YAML files. And please don't ask for help _formatting_ your JSON or YAML!)
 
@@ -127,7 +171,7 @@ If both build-info.plist and build-info.json are present, the plist file will be
 
 #### build-info.yaml
 
-As a third alternative, you may specify build-info in YAML format, if you've installed the Python YAML module (PyYAML). A new project created with `munkipkg --create --yaml Foo` would have this build-info.yaml file:
+As a third alternative, you may specify build-info in YAML format (now natively supported with Swift YAMS library). A new project created with `munkipkg --create --yaml Foo` would have this build-info.yaml file:
 
 ```yaml
 distribution_style: false

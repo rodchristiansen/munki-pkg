@@ -6,14 +6,15 @@
 //
 
 import Foundation
+import Yams
 
-class BuildInfoError: MunkiPkgError {}
+public class BuildInfoError: MunkiPkgError {}
 
-class BuildInfoReadError: BuildInfoError {}
+public class BuildInfoReadError: BuildInfoError {}
 
-class BuildInfoWriteError: BuildInfoError {}
+public class BuildInfoWriteError: BuildInfoError {}
 
-struct SigningInfo: Codable {
+public struct SigningInfo: Codable {
     var identity: String
     var keychain: String?
     var additionalCertNames: [String]?
@@ -27,7 +28,7 @@ struct SigningInfo: Codable {
     }
 }
 
-struct NotarizationInfo: Codable {
+public struct NotarizationInfo: Codable {
     var appleId: String?
     var teamId: String?
     var password: String?
@@ -45,24 +46,24 @@ struct NotarizationInfo: Codable {
     }
 }
 
-enum Ownership: String, Codable {
+public enum Ownership: String, Codable {
     case recommended = "recommended"
     case preserve = "preserve"
     case preserveOther = "preserve-other"
 }
 
-enum PostInstallAction: String, Codable {
+public enum PostInstallAction: String, Codable {
     case none = "none"
     case logout = "logout"
     case restart = "restart"
 }
 
-enum CompressionOption: String, Codable {
+public enum CompressionOption: String, Codable {
     case legacy = "legacy"
     case latest = "latest"
 }
 
-struct BuildInfo: Codable {
+public struct BuildInfo: Codable {
     var name: String = ""
     var identifier: String = ""
     var version: String = "1.0"
@@ -76,6 +77,7 @@ struct BuildInfo: Codable {
     var compression: CompressionOption? = .legacy
     var minOSVersion: String? = "10.5"
     var largePayload: Bool? = false
+    var installKbytes: Int?
     var signingInfo: SigningInfo?
     var notarizationInfo: NotarizationInfo?
     
@@ -93,16 +95,21 @@ struct BuildInfo: Codable {
         case compression
         case minOSVersion = "min-os-version"
         case largePayload = "large-payload"
+        case installKbytes = "install_kbytes"
         case signingInfo = "signing_info"
         case notarizationInfo = "notarization_info"
     }
     
-    init(fromPlistData data: Data) throws {
+    public init() {
+        // Default initializer with default values already set
+    }
+    
+    public init(fromPlistData data: Data) throws {
         let decoder = PropertyListDecoder()
         self = try decoder.decode(BuildInfo.self, from: data)
     }
     
-    init(fromPlistString plistString: String) throws {
+    public init(fromPlistString plistString: String) throws {
         let decoder = PropertyListDecoder()
         if let data = plistString.data(using: .utf8) {
             self = try decoder.decode(BuildInfo.self, from: data)
@@ -111,12 +118,12 @@ struct BuildInfo: Codable {
         }
     }
     
-    init(fromJsonData data: Data) throws {
+    public init(fromJsonData data: Data) throws {
         let decoder = JSONDecoder()
         self = try decoder.decode(BuildInfo.self, from: data)
     }
     
-    init(fromJsonString jsonString: String) throws {
+    public init(fromJsonString jsonString: String) throws {
         let decoder = JSONDecoder()
         if let data = jsonString.data(using: .utf8) {
             self = try decoder.decode(BuildInfo.self, from: data)
@@ -125,7 +132,20 @@ struct BuildInfo: Codable {
         }
     }
     
-    init(fromFile filename: String) throws {
+    public init(fromYamlData data: Data) throws {
+        guard let yamlString = String(data: data, encoding: .utf8) else {
+            throw BuildInfoReadError("Invalid YAML data encoding")
+        }
+        let decoder = YAMLDecoder()
+        self = try decoder.decode(BuildInfo.self, from: yamlString)
+    }
+    
+    public init(fromYamlString yamlString: String) throws {
+        let decoder = YAMLDecoder()
+        self = try decoder.decode(BuildInfo.self, from: yamlString)
+    }
+    
+    public init(fromFile filename: String) throws {
         guard let data = NSData(contentsOfFile: filename) as? Data else {
             throw BuildInfoReadError("Could not read data from file")
         }
@@ -137,13 +157,13 @@ struct BuildInfo: Codable {
             let decoder = JSONDecoder()
             self = try decoder.decode(BuildInfo.self, from: data)
         } else if ["yaml", "yml"].contains(ext) {
-            throw BuildInfoReadError("YAML format is currently unsupported")
+            self = try BuildInfo(fromYamlData: data)
         } else {
             throw BuildInfoReadError("Unsupported file format")
         }
     }
     
-    mutating func doSubstitutions() {
+    public mutating func doSubstitutions() {
         if name.contains("${version}") {
             name = name.replacingOccurrences(of: "${version}", with: version)
         }
@@ -168,9 +188,19 @@ struct BuildInfo: Codable {
     func plistString() throws -> String {
         return String(data: try plistData(), encoding: .utf8)!
     }
+    
+    func yamlData() throws -> Data {
+        let yamlString = try yamlString()
+        return yamlString.data(using: .utf8)!
+    }
+    
+    func yamlString() throws -> String {
+        let encoder = YAMLEncoder()
+        return try encoder.encode(self)
+    }
 }
 
-func getBuildInfo(projectDir: String, format: String = "") throws -> BuildInfo {
+public func getBuildInfo(projectDir: String, format: String = "") throws -> BuildInfo {
     var filetype = ""
     let filenameWithoutExtension = (projectDir as NSString).appendingPathComponent("build-info")
     if format != "" {

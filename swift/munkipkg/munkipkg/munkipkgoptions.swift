@@ -65,7 +65,7 @@ struct CreateAndImportOptions: ParsableArguments {
     var json = false
 
     @Flag(name: .long,
-          help: "Create build-info file in YAML format. Useful only with --create and --import options. (Not currently supported)")
+          help: "Create build-info file in YAML format. Useful only with --create and --import options.")
     var yaml = false
 
     @Flag(name: .long,
@@ -75,10 +75,6 @@ struct CreateAndImportOptions: ParsableArguments {
     mutating func validate() throws {
         if json && yaml {
             throw ValidationError("Only one of --json and --yaml can be specified.")
-        }
-        
-        if yaml {
-            throw ValidationError("--yaml is not currently supported.")
         }
     }
 }
