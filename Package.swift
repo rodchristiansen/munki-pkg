@@ -1,11 +1,11 @@
-// swift-tools-version: 5.5
+// swift-tools-version: 6.2
 
 import PackageDescription
 
 let package = Package(
     name: "munkipkg",
     platforms: [
-        .macOS(.v11) // macOS 11.0 Big Sur minimum
+        .macOS("14.0") // macOS 14.0 Sonoma minimum for full Swift 6 concurrency features
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -20,7 +20,10 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams", package: "Yams")
             ],
-            path: "munkipkg"
+            path: "munkipkg",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
         ),
         .testTarget(
             name: "munkipkgTests",
@@ -28,6 +31,9 @@ let package = Package(
             path: "munkipkgTests",
             resources: [
                 .copy("fixtures")
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
             ]
         ),
     ]

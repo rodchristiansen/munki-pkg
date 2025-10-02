@@ -68,18 +68,9 @@ struct BuildInfoTests {
                 "install_location": "/"
             }
             """
-        var gotExpectedError = false
-        do {
-            let _ = try BuildInfo(fromJsonString: jsonString)
-        } catch {
-            switch error {
-            case DecodingError.keyNotFound(_, _):
-                gotExpectedError = true
-            default:
-                gotExpectedError = false
-            }
+        #expect(throws: BuildInfoReadError.self) {
+            try BuildInfo(fromJsonString: jsonString)
         }
-        #expect(gotExpectedError)
     }
     
     @Test func throwsErrorOnKeyWithWrongType() async throws {
@@ -96,18 +87,9 @@ struct BuildInfoTests {
                 "install_location": "/"
             }
             """
-        var gotExpectedError = false
-        do {
-            let _ = try BuildInfo(fromJsonString: jsonString)
-        } catch {
-            switch error {
-            case DecodingError.typeMismatch(_, _):
-                gotExpectedError = true
-            default:
-                gotExpectedError = false
-            }
+        #expect(throws: BuildInfoReadError.self) {
+            try BuildInfo(fromJsonString: jsonString)
         }
-        #expect(gotExpectedError)
     }
     
     @Test func canReadJsonFile() async throws {
