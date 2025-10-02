@@ -25,6 +25,10 @@ struct ActionOptions: ParsableArguments {
           help: "Use Bom.txt in the project at <project-path> to set modes of files in payload directory and create missing empty directories. Useful after a git clone or pull.")
     var sync = false
 
+    @Option(name: .long,
+            help: ArgumentHelp("Migrate build-info file(s) to specified format (plist, json, or yaml). Can be used on a single project or a parent directory containing multiple projects.", valueName: "format"))
+    var migrate: String?
+
     @Argument(help: "Path to package project directory.")
     var projectPath: String
 
@@ -34,13 +38,22 @@ struct ActionOptions: ParsableArguments {
         if create { actionCount += 1 }
         if importPath != nil { actionCount += 1 }
         if sync { actionCount += 1 }
+        if migrate != nil { actionCount += 1 }
         if actionCount == 0 {
             // default to build
             build = true
             actionCount = 1
         }
         if actionCount != 1 {
-            throw ValidationError("One (and only one) of --build, --create, --import, or --sync must be specified.")
+            throw ValidationError("One (and only one) of --build, --create, --import, --sync, or --migrate must be specified.")
+        }
+        
+        // Validate migrate format if specified
+        if let format = migrate {
+            let validFormats = ["plist", "json", "yaml", "yml"]
+            if !validFormats.contains(format.lowercased()) {
+                throw ValidationError("Invalid format '\(format)'. Must be one of: plist, json, yaml")
+            }
         }
     }
 }
