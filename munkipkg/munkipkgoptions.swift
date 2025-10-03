@@ -30,7 +30,7 @@ struct ActionOptions: ParsableArguments {
     var migrate: String?
 
     @Argument(help: "Path to package project directory.")
-    var projectPath: String
+    var projectPath: String = ""
 
     mutating func validate() throws {
         var actionCount = 0
@@ -96,4 +96,8 @@ struct AdditionalOptions: ParsableArguments {
     @Flag(name: .long,
           help: "Inhibits status messages on stdout. Any error messages are still sent to stderr.")
     var quiet = false
+    
+    @Flag(name: .long,
+          help: "Display version information.")
+    var version = false
 }

@@ -28,6 +28,16 @@ struct MunkiPkg: AsyncParsableCommand {
     var additionalOptions: AdditionalOptions
 
     mutating func validate() throws {
+        // Allow --version without a project path
+        if additionalOptions.version {
+            return
+        }
+        
+        // All other operations require a project path
+        if actionOptions.projectPath.isEmpty {
+            throw ValidationError("Missing expected argument '<project-path>'")
+        }
+        
         // action is not build
         if !actionOptions.build {
             // check for options that only work with --build
@@ -56,8 +66,14 @@ struct MunkiPkg: AsyncParsableCommand {
             }
         }
     }
-
+    
     mutating func run() async throws {
+        // Handle --version flag first
+        if additionalOptions.version {
+            print(VERSION)
+            return
+        }
+        
         do {
             // Handle different actions
             if actionOptions.create {

@@ -12,3 +12,9 @@ DerivedData/
 
 # VSCode
 .vscode/launch.json
+
+# Auto-generated version file
+munkipkg/version.swift
+
+# Environment configuration (may contain secrets)
+.env
