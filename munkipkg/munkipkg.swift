@@ -493,6 +493,50 @@ struct MunkiPkg: AsyncParsableCommand {
         try GITIGNORE_DEFAULT.write(to: gitignorePath, atomically: true, encoding: .utf8)
     }
     
+    private func analyzePermissionsInBom(bomPath: URL, buildInfo: BuildInfo) -> (hasNonRecommendedOwnership: Bool, warnings: [String]) {
+        var hasNonRootOwnership = false
+        var warnings: [String] = []
+        
+        guard let bomContent = try? String(contentsOf: bomPath, encoding: .utf8) else {
+            return (false, [])
+        }
+        
+        let lines = bomContent.components(separatedBy: .newlines)
+        
+        for line in lines {
+            // Skip empty lines and root directory entry
+            if line.isEmpty || line.hasPrefix(".\t") {
+                continue
+            }
+            
+            // Parse BOM line format: "path\tmode\tuid/gid"
+            let parts = line.components(separatedBy: "\t")
+            guard parts.count >= 3 else { continue }
+            
+            let path = parts[0]
+            let ownerGroup = parts[2]
+            
+            // Parse owner/group
+            let ownerParts = ownerGroup.components(separatedBy: "/")
+            let uid = uid_t(ownerParts[0]) ?? 0
+            let gid = gid_t(ownerParts.count > 1 ? ownerParts[1] : "0") ?? 0
+            
+            // Check for non-root ownership
+            if uid != 0 || gid != 0 {
+                hasNonRootOwnership = true
+                warnings.append("File \(path) has owner/group \(ownerGroup) (not 0/0)")
+            }
+        }
+        
+        // Provide recommendations based on findings
+        if hasNonRootOwnership && buildInfo.ownership == .recommended {
+            warnings.insert("WARNING: BOM contains files with non-root ownership (not 0/0), but build-info ownership is set to 'recommended'.", at: 0)
+            warnings.insert("RECOMMENDATION: Consider changing ownership to 'preserve' or 'preserve-other' in build-info to maintain the correct ownership.", at: 1)
+        }
+        
+        return (hasNonRootOwnership, warnings)
+    }
+    
     private func syncFromBomInfo() throws {
         let projectPath = actionOptions.projectPath
         let projectURL = URL(fileURLWithPath: projectPath)
@@ -506,9 +550,20 @@ struct MunkiPkg: AsyncParsableCommand {
         let buildInfo = try loadBuildInfo(from: projectURL)
         let runningAsRoot = getuid() == 0
         
+        // Analyze BOM for permission issues
+        let (_, warnings) = analyzePermissionsInBom(bomPath: bomPath, buildInfo: buildInfo)
+        
+        // Display warnings about ownership issues
+        if !warnings.isEmpty {
+            for warning in warnings {
+                printStderr("\(warning)\n")
+            }
+            printStderr("\n")
+        }
+        
         // Warn if ownership mode might require sudo
         if buildInfo.ownership != .recommended && !runningAsRoot {
-            printStderr("\nWARNING: build-info ownership: \(buildInfo.ownership?.rawValue ?? "unknown") might require using sudo to properly sync owner and group for payload files.\n")
+            printStderr("WARNING: build-info ownership: \(buildInfo.ownership?.rawValue ?? "unknown") might require using sudo to properly sync owner and group for payload files.\n\n")
         }
         
         let bomContent = try String(contentsOf: bomPath, encoding: .utf8)
@@ -806,6 +861,13 @@ struct MunkiPkg: AsyncParsableCommand {
                     productbuildArgs.insert(contentsOf: ["--keychain", expandedKeychain], at: 0)
                 }
                 
+                // Add additional certificates if specified
+                if let additionalCerts = signingInfo.additionalCertNames {
+                    for certName in additionalCerts {
+                        productbuildArgs.insert(contentsOf: ["--certs", certName], at: 0)
+                    }
+                }
+                
                 // Add timestamp if specified
                 if signingInfo.timestamp == true {
                     productbuildArgs.insert("--timestamp", at: 0)
@@ -845,18 +907,39 @@ struct MunkiPkg: AsyncParsableCommand {
         
         // Handle notarization
         if !buildOptions.skipNotarization,
-           let notarizationInfo = buildInfo.notarizationInfo,
-           let keychainProfile = notarizationInfo.keychainProfile {
+           let notarizationInfo = buildInfo.notarizationInfo {
+            
+            // Prepare notarization arguments
+            var notarizeArgs = ["notarytool", "submit", finalPackagePath]
+            
+            // Use keychain profile if specified, otherwise use Apple ID authentication
+            if let keychainProfile = notarizationInfo.keychainProfile {
+                notarizeArgs.append(contentsOf: ["--keychain-profile", keychainProfile])
+            } else if let appleId = notarizationInfo.appleId,
+                      let teamId = notarizationInfo.teamId,
+                      let password = notarizationInfo.password {
+                notarizeArgs.append(contentsOf: ["--apple-id", appleId])
+                notarizeArgs.append(contentsOf: ["--team-id", teamId])
+                notarizeArgs.append(contentsOf: ["--password", password])
+                
+                // Add ASC provider if specified
+                if let ascProvider = notarizationInfo.ascProvider {
+                    notarizeArgs.append(contentsOf: ["--asc-provider", ascProvider])
+                }
+            } else {
+                if !additionalOptions.quiet {
+                    print("munkipkg: Notarization info incomplete - need either keychain_profile or apple_id+team_id+password")
+                }
+                throw MunkiPkgError("Incomplete notarization authentication information")
+            }
+            
+            notarizeArgs.append("--wait")
             
             if !additionalOptions.quiet {
                 print("munkipkg: Uploading package to Apple notary service")
             }
             
-            let notarizeResult = await runCliAsync("/usr/bin/xcrun", arguments: [
-                "notarytool", "submit", finalPackagePath,
-                "--keychain-profile", keychainProfile,
-                "--wait"
-            ])
+            let notarizeResult = await runCliAsync("/usr/bin/xcrun", arguments: notarizeArgs)
             
             // Always print output
             if !additionalOptions.quiet {
