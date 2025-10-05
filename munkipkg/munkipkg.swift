@@ -8,6 +8,20 @@
 import ArgumentParser
 import Foundation
 
+// Default .gitignore content for new projects
+private let GITIGNORE_DEFAULT = """
+# .DS_Store files!
+.DS_Store
+
+# our build directory
+build/
+"""
+
+// Helper for printing to stderr
+private func printStderr(_ message: String) {
+    FileHandle.standardError.write(Data(message.utf8))
+}
+
 @main
 struct MunkiPkg: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -80,6 +94,8 @@ struct MunkiPkg: AsyncParsableCommand {
                 try createPackageProject()
             } else if let importPath = actionOptions.importPath {
                 try await importPackage(from: importPath)
+            } else if actionOptions.sync {
+                try syncFromBomInfo()
             } else if let targetFormat = actionOptions.migrate {
                 try migrateBuildInfo(to: targetFormat)
             } else if actionOptions.build {
@@ -297,6 +313,9 @@ struct MunkiPkg: AsyncParsableCommand {
             try buildInfo.plistString().write(toFile: buildInfoPath, atomically: true, encoding: .utf8)
         }
         
+        // Create default .gitignore
+        try createDefaultGitignore(at: projectURL)
+        
         print("Created package project at: \(projectPath)")
     }
     
@@ -326,6 +345,9 @@ struct MunkiPkg: AsyncParsableCommand {
         } else {
             try await importFlatPackage(from: importURL, to: projectURL)
         }
+        
+        // Create default .gitignore
+        try createDefaultGitignore(at: projectURL)
         
         print("Successfully imported package to: \(projectPath)")
     }
@@ -464,6 +486,187 @@ struct MunkiPkg: AsyncParsableCommand {
         }
     }
     
+    // MARK: - Helper functions
+    
+    private func createDefaultGitignore(at projectURL: URL) throws {
+        let gitignorePath = projectURL.appendingPathComponent(".gitignore")
+        try GITIGNORE_DEFAULT.write(to: gitignorePath, atomically: true, encoding: .utf8)
+    }
+    
+    private func syncFromBomInfo() throws {
+        let projectPath = actionOptions.projectPath
+        let projectURL = URL(fileURLWithPath: projectPath)
+        let bomPath = projectURL.appendingPathComponent("Bom.txt")
+        
+        guard FileManager.default.fileExists(atPath: bomPath.path) else {
+            throw MunkiPkgError("No Bom.txt file found in \(projectPath)")
+        }
+        
+        // Load build info to check ownership mode
+        let buildInfo = try loadBuildInfo(from: projectURL)
+        let runningAsRoot = getuid() == 0
+        
+        // Warn if ownership mode might require sudo
+        if buildInfo.ownership != .recommended && !runningAsRoot {
+            printStderr("\nWARNING: build-info ownership: \(buildInfo.ownership?.rawValue ?? "unknown") might require using sudo to properly sync owner and group for payload files.\n")
+        }
+        
+        let bomContent = try String(contentsOf: bomPath, encoding: .utf8)
+        let lines = bomContent.components(separatedBy: .newlines)
+        
+        var changesMade = 0
+        let payloadDir = projectURL.appendingPathComponent("payload")
+        
+        for line in lines {
+            // Skip empty lines and root directory entry
+            if line.isEmpty || line.hasPrefix(".\t") {
+                continue
+            }
+            
+            // Parse BOM line format: "path\tmode\tuid/gid"
+            let parts = line.components(separatedBy: "\t")
+            guard parts.count >= 3 else { continue }
+            
+            let path = parts[0]
+            let fullMode = parts[1]
+            let ownerGroup = parts[2]
+            
+            let payloadPath = payloadDir.appendingPathComponent(path)
+            
+            // Check for extended attributes warning
+            let basename = (path as NSString).lastPathComponent
+            if basename.hasPrefix("._") {
+                let otherfile = ((path as NSString).deletingLastPathComponent as NSString).appendingPathComponent(String(basename.dropFirst(2)))
+                printStderr("WARNING: file \(path) contains extended attributes or a resource fork for \(otherfile). git and pkgbuild may not properly preserve extended attributes.\n")
+                continue
+            }
+            
+            // Parse mode (handle both octal 4-digit and 5-digit)
+            let mode: mode_t
+            if fullMode.count == 5 {
+                // 5-digit mode includes file type
+                mode = mode_t(fullMode.suffix(4), radix: 8) ?? 0
+            } else {
+                mode = mode_t(fullMode, radix: 8) ?? 0
+            }
+            
+            // Parse owner/group
+            let ownerParts = ownerGroup.components(separatedBy: "/")
+            let uid = uid_t(ownerParts[0]) ?? 0
+            let gid = gid_t(ownerParts.count > 1 ? ownerParts[1] : "0") ?? 0
+            
+            if FileManager.default.fileExists(atPath: payloadPath.path) {
+                // Update permissions on existing file/directory
+                do {
+                    var attributes: [FileAttributeKey: Any] = [
+                        .posixPermissions: mode
+                    ]
+                    
+                    // Only set owner/group if not in recommended mode or if running as root
+                    if buildInfo.ownership != .recommended || runningAsRoot {
+                        attributes[.ownerAccountID] = uid
+                        attributes[.groupOwnerAccountID] = gid
+                    }
+                    
+                    try FileManager.default.setAttributes(attributes, ofItemAtPath: payloadPath.path)
+                    changesMade += 1
+                } catch {
+                    printStderr("ERROR: Could not update \(payloadPath.path): \(error.localizedDescription)\n")
+                }
+            } else if fullMode.hasPrefix("4") {
+                // Missing directory - create it
+                do {
+                    try FileManager.default.createDirectory(at: payloadPath, withIntermediateDirectories: true)
+                    
+                    var attributes: [FileAttributeKey: Any] = [
+                        .posixPermissions: mode
+                    ]
+                    
+                    if buildInfo.ownership != .recommended || runningAsRoot {
+                        attributes[.ownerAccountID] = uid
+                        attributes[.groupOwnerAccountID] = gid
+                    }
+                    
+                    try FileManager.default.setAttributes(attributes, ofItemAtPath: payloadPath.path)
+                    changesMade += 1
+                } catch {
+                    printStderr("ERROR: Could not create directory \(payloadPath.path): \(error.localizedDescription)\n")
+                }
+            } else {
+                // Missing file - this is a problem
+                printStderr("ERROR: File \(payloadPath.path) is missing in payload\n")
+                throw MunkiPkgError("Sync failed: missing files in payload")
+            }
+        }
+        
+        if !additionalOptions.quiet {
+            print("Sync complete. Updated \(changesMade) items from Bom.txt")
+        }
+    }
+    
+    private func makeComponentPropertyList(buildInfo: BuildInfo, tempDir: URL) async throws -> URL? {
+        // Only create if suppress_bundle_relocation is true
+        guard buildInfo.suppressBundleRelocation == true else {
+            return nil
+        }
+        
+        let componentPlistPath = tempDir.appendingPathComponent("component.plist")
+        let payloadPath = tempDir.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("payload").path
+        
+        // Use pkgbuild --analyze to generate template
+        let analyzeArgs = [
+            "--analyze",
+            "--root", payloadPath,
+            componentPlistPath.path
+        ]
+        
+        let analyzeResult = await runCliAsync("/usr/bin/pkgbuild", arguments: analyzeArgs)
+        guard analyzeResult.exitCode == 0 else {
+            throw MunkiPkgError("Failed to analyze package components")
+        }
+        
+        // Read the plist and modify BundleIsRelocatable
+        guard let plistData = try? Data(contentsOf: componentPlistPath),
+              var plistArray = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [[String: Any]] else {
+            throw MunkiPkgError("Failed to read component plist")
+        }
+        
+        // Set BundleIsRelocatable to false for all components
+        for i in 0..<plistArray.count {
+            plistArray[i]["BundleIsRelocatable"] = false
+        }
+        
+        // Write back
+        let modifiedData = try PropertyListSerialization.data(fromPropertyList: plistArray, format: .xml, options: 0)
+        try modifiedData.write(to: componentPlistPath)
+        
+        return componentPlistPath
+    }
+    
+    private func makePkgInfo(buildInfo: BuildInfo, tempDir: URL) throws -> URL? {
+        // Only create if we have postinstall_action or preserve_xattr
+        guard buildInfo.postinstallAction != nil || buildInfo.preserveXattr == true else {
+            return nil
+        }
+        
+        let pkginfoPath = tempDir.appendingPathComponent("PackageInfo")
+        
+        // Create a minimal PackageInfo XML
+        var xml = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <pkg-info postinstall-action="\(buildInfo.postinstallAction?.rawValue ?? "none")"
+        """
+        
+        if buildInfo.preserveXattr == true {
+            xml += " preserve-xattr=\"true\""
+        }
+        
+        xml += "/>\n"
+        
+        try xml.write(to: pkginfoPath, atomically: true, encoding: .utf8)
+        return pkginfoPath
+    }
+    
     // MARK: - Build functionality
     private func buildPackage() async throws {
         let projectPath = actionOptions.projectPath
@@ -507,6 +710,21 @@ struct MunkiPkg: AsyncParsableCommand {
             try FileManager.default.createDirectory(at: buildDir, withIntermediateDirectories: true)
         }
         
+        // Create temp directory for component plist and pkginfo if needed
+        let tempDir = buildDir.appendingPathComponent("tmp")
+        if !FileManager.default.fileExists(atPath: tempDir.path) {
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        }
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+        
+        // Generate component property list if needed
+        let componentPlistPath = try await makeComponentPropertyList(buildInfo: buildInfo, tempDir: tempDir)
+        
+        // Generate PackageInfo if needed
+        let pkginfoPath = try makePkgInfo(buildInfo: buildInfo, tempDir: tempDir)
+        
         let packageName = buildInfo.name.hasSuffix(".pkg") ? buildInfo.name : "\(buildInfo.name).pkg"
         let componentPackagePath = buildDir.appendingPathComponent(packageName).path
         
@@ -516,6 +734,16 @@ struct MunkiPkg: AsyncParsableCommand {
             "--identifier", buildInfo.identifier,
             "--version", buildInfo.version
         ]
+        
+        // Add component plist if we created one
+        if let componentPlist = componentPlistPath {
+            pkgbuildArgs.append(contentsOf: ["--component-plist", componentPlist.path])
+        }
+        
+        // Add pkginfo if we created one
+        if let pkginfo = pkginfoPath {
+            pkgbuildArgs.append(contentsOf: ["--info", pkginfo.path])
+        }
         
         // Add install location if specified
         if let installLocation = buildInfo.installLocation {
@@ -565,7 +793,7 @@ struct MunkiPkg: AsyncParsableCommand {
             // Add signing if specified
             if let signingInfo = buildInfo.signingInfo {
                 if !additionalOptions.quiet {
-                    print("munkipkg: Adding package signing info to command")
+                    print("\nmunkipkg: Adding package signing info to command")
                 }
                 productbuildArgs.insert(contentsOf: ["--sign", signingInfo.identity], at: 0)
                 
@@ -602,7 +830,7 @@ struct MunkiPkg: AsyncParsableCommand {
             
             // Remove component package
             if !additionalOptions.quiet {
-                print("munkipkg: Removing component package \(componentPackagePath)")
+                print("\nmunkipkg: Removing component package \(componentPackagePath)")
             }
             try FileManager.default.removeItem(atPath: componentPackagePath)
             
