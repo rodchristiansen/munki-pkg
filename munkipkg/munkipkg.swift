@@ -501,30 +501,187 @@ struct MunkiPkg: AsyncParsableCommand {
     }
     
     private func performBuild(projectURL: URL, buildInfo: BuildInfo) async throws -> String {
-        let outputFilename = "\(buildInfo.name)-\(buildInfo.version).pkg"
-        let outputPath = projectURL.appendingPathComponent(outputFilename).path
+        // Create build directory
+        let buildDir = projectURL.appendingPathComponent("build")
+        if !FileManager.default.fileExists(atPath: buildDir.path) {
+            try FileManager.default.createDirectory(at: buildDir, withIntermediateDirectories: true)
+        }
         
-        // Use pkgbuild to create the package
-        var arguments = [
+        let packageName = buildInfo.name.hasSuffix(".pkg") ? buildInfo.name : "\(buildInfo.name).pkg"
+        let componentPackagePath = buildDir.appendingPathComponent(packageName).path
+        
+        // Build component package with pkgbuild
+        var pkgbuildArgs = [
             "--root", projectURL.appendingPathComponent("payload").path,
             "--identifier", buildInfo.identifier,
-            "--version", buildInfo.version,
-            outputPath
+            "--version", buildInfo.version
         ]
+        
+        // Add install location if specified
+        if let installLocation = buildInfo.installLocation {
+            pkgbuildArgs.append(contentsOf: ["--install-location", installLocation])
+        }
+        
+        // Add ownership if specified
+        if let ownership = buildInfo.ownership {
+            pkgbuildArgs.append(contentsOf: ["--ownership", ownership.rawValue])
+        }
         
         // Add scripts if they exist
         let scriptsPath = projectURL.appendingPathComponent("scripts").path
         if FileManager.default.fileExists(atPath: scriptsPath) {
-            arguments.insert(contentsOf: ["--scripts", scriptsPath], at: arguments.count - 1)
+            pkgbuildArgs.append(contentsOf: ["--scripts", scriptsPath])
         }
         
-        let result = await runCliAsync("/usr/bin/pkgbuild", arguments: arguments)
+        pkgbuildArgs.append(componentPackagePath)
         
-        if result.exitCode != 0 {
-            throw MunkiPkgError.buildFailed("Package build failed: \(result.stderr)")
+        if !additionalOptions.quiet {
+            print("pkgbuild: Building component package...")
         }
         
-        return outputPath
+        let pkgbuildResult = await runCliAsync("/usr/bin/pkgbuild", arguments: pkgbuildArgs)
+        
+        if pkgbuildResult.exitCode != 0 {
+            throw MunkiPkgError.buildFailed("pkgbuild failed: \(pkgbuildResult.stderr)")
+        }
+        
+        if !additionalOptions.quiet {
+            print(pkgbuildResult.stdout, terminator: "")
+            print(pkgbuildResult.stderr, terminator: "")
+        }
+        
+        var finalPackagePath = componentPackagePath
+        
+        // Handle distribution-style packages and signing
+        if buildInfo.distributionStyle == true || buildInfo.signingInfo != nil {
+            let distPackageName = "Dist-\(packageName)"
+            let distPackagePath = buildDir.appendingPathComponent(distPackageName).path
+            
+            var productbuildArgs = [
+                "--package", componentPackagePath,
+                distPackagePath
+            ]
+            
+            // Add signing if specified
+            if let signingInfo = buildInfo.signingInfo {
+                if !additionalOptions.quiet {
+                    print("munkipkg: Adding package signing info to command")
+                }
+                productbuildArgs.insert(contentsOf: ["--sign", signingInfo.identity], at: 0)
+                
+                // Add keychain if specified
+                if let keychain = signingInfo.keychain {
+                    // Expand ${HOME} environment variable if present
+                    var expandedKeychain = keychain.replacingOccurrences(of: "${HOME}", with: NSHomeDirectory())
+                    // Also expand tilde
+                    expandedKeychain = NSString(string: expandedKeychain).expandingTildeInPath
+                    productbuildArgs.insert(contentsOf: ["--keychain", expandedKeychain], at: 0)
+                }
+                
+                // Add timestamp if specified
+                if signingInfo.timestamp == true {
+                    productbuildArgs.insert("--timestamp", at: 0)
+                }
+            }
+            
+            if !additionalOptions.quiet {
+                print("productbuild: Creating distribution package...")
+            }
+            
+            let productbuildResult = await runCliAsync("/usr/bin/productbuild", arguments: productbuildArgs)
+            
+            // Always print output even if there's an error
+            if !additionalOptions.quiet || productbuildResult.exitCode != 0 {
+                print(productbuildResult.stdout, terminator: "")
+                print(productbuildResult.stderr, terminator: "")
+            }
+            
+            if productbuildResult.exitCode != 0 {
+                throw MunkiPkgError.buildFailed("productbuild failed with exit code \(productbuildResult.exitCode)")
+            }
+            
+            // Remove component package
+            if !additionalOptions.quiet {
+                print("munkipkg: Removing component package \(componentPackagePath)")
+            }
+            try FileManager.default.removeItem(atPath: componentPackagePath)
+            
+            // Rename distribution package
+            if !additionalOptions.quiet {
+                print("munkipkg: Renaming distribution package \(distPackagePath) to \(componentPackagePath)")
+            }
+            try FileManager.default.moveItem(atPath: distPackagePath, toPath: componentPackagePath)
+            
+            finalPackagePath = componentPackagePath
+        }
+        
+        // Handle notarization
+        if !buildOptions.skipNotarization,
+           let notarizationInfo = buildInfo.notarizationInfo,
+           let keychainProfile = notarizationInfo.keychainProfile {
+            
+            if !additionalOptions.quiet {
+                print("munkipkg: Uploading package to Apple notary service")
+            }
+            
+            let notarizeResult = await runCliAsync("/usr/bin/xcrun", arguments: [
+                "notarytool", "submit", finalPackagePath,
+                "--keychain-profile", keychainProfile,
+                "--wait"
+            ])
+            
+            // Always print output
+            if !additionalOptions.quiet {
+                print(notarizeResult.stdout, terminator: "")
+                if !notarizeResult.stderr.isEmpty {
+                    print(notarizeResult.stderr, terminator: "")
+                }
+            }
+            
+            // Check if notarization was successful by looking for "Accepted" status
+            let notarizationSucceeded = notarizeResult.exitCode == 0 && 
+                                        notarizeResult.stdout.contains("status: Accepted")
+            
+            if notarizeResult.exitCode != 0 {
+                if !additionalOptions.quiet {
+                    print("munkipkg: Notarization submission failed")
+                }
+            } else if !notarizationSucceeded {
+                if !additionalOptions.quiet {
+                    print("munkipkg: Notarization completed but package was not accepted")
+                    if notarizeResult.stdout.contains("status: Invalid") {
+                        print("munkipkg: Package notarization returned Invalid status")
+                    }
+                }
+            } else {
+                if !additionalOptions.quiet {
+                    print("munkipkg: Successfully received submission info")
+                }
+                
+                // Staple if not skipped and notarization was successful
+                if !buildOptions.skipStapling {
+                    if !additionalOptions.quiet {
+                        print("munkipkg: Stapling package")
+                    }
+                    
+                    let stapleResult = await runCliAsync("/usr/bin/xcrun", arguments: [
+                        "stapler", "staple", finalPackagePath
+                    ])
+                    
+                    if stapleResult.exitCode == 0 {
+                        if !additionalOptions.quiet {
+                            print("munkipkg: The staple and validate action worked!")
+                        }
+                    } else {
+                        if !additionalOptions.quiet {
+                            print("munkipkg: Stapling failed: \(stapleResult.stderr)")
+                        }
+                    }
+                }
+            }
+        }
+        
+        return finalPackagePath
     }
     
     private func exportBom(for projectURL: URL, buildInfo: BuildInfo) async throws {
