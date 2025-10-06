@@ -29,7 +29,7 @@ func trimTrailingNewline(_ s: String) -> String {
     return trimmedString
 }
 
-struct CLIResults {
+struct CLIResults: Sendable {
     var exitCode: Int = 0
     var stdout: String = "" // process stdout
     var stderr: String = "" // process stderr
@@ -37,7 +37,7 @@ struct CLIResults {
     var failureDetail: String = "" // error text from this code
 }
 
-enum ProcessError: Error {
+enum ProcessError: Error, Sendable {
     case error(description: String)
     case timeout
 }
@@ -46,7 +46,7 @@ enum ProcessError: Error {
 func checkOutput(_ tool: String,
                  arguments: [String] = [],
                  environment: [String: String] = [:],
-                 stdIn: String = "") throws -> String
+                 stdIn: String = "") throws(ProcessError) -> String
 {
     let result = runCLI(
         tool,
@@ -55,9 +55,27 @@ func checkOutput(_ tool: String,
         stdIn: stdIn
     )
     if result.exitCode != 0 {
-        throw ProcessError.error(description: result.stderr)
+        throw .error(description: result.stderr)
     }
     return result.stdout
+}
+
+/// Actor to safely accumulate process output from concurrent callbacks
+private actor ProcessOutputAccumulator {
+    var stdout: String = ""
+    var stderr: String = ""
+    
+    func appendStdout(_ text: String) {
+        stdout.append(text)
+    }
+    
+    func appendStderr(_ text: String) {
+        stderr.append(text)
+    }
+    
+    func getOutput() -> (stdout: String, stderr: String) {
+        return (stdout, stderr)
+    }
 }
 
 /// a basic wrapper intended to be used just as you would runCLI, but async
@@ -66,7 +84,8 @@ func runCliAsync(_ tool: String,
                  environment: [String: String] = [:],
                  stdIn: String = "") async -> CLIResults
 {
-    var results = CLIResults()
+    let accumulator = ProcessOutputAccumulator()
+    var exitCode: Int = 0
 
     let task = Process()
     task.executableURL = URL(fileURLWithPath: tool)
@@ -81,8 +100,10 @@ func runCliAsync(_ tool: String,
         let data = fh.availableData
         if data.isEmpty { // EOF on the pipe
             outputPipe.fileHandleForReading.readabilityHandler = nil
-        } else {
-            results.stdout.append(String(data: data, encoding: .utf8)!)
+        } else if let text = String(data: data, encoding: .utf8) {
+            Task {
+                await accumulator.appendStdout(text)
+            }
         }
     }
     let errorPipe = Pipe()
@@ -90,8 +111,10 @@ func runCliAsync(_ tool: String,
         let data = fh.availableData
         if data.isEmpty { // EOF on the pipe
             errorPipe.fileHandleForReading.readabilityHandler = nil
-        } else {
-            results.stderr.append(String(data: data, encoding: .utf8)!)
+        } else if let text = String(data: data, encoding: .utf8) {
+            Task {
+                await accumulator.appendStderr(text)
+            }
         }
     }
     let inputPipe = Pipe()
@@ -112,8 +135,7 @@ func runCliAsync(_ tool: String,
         try task.run()
     } catch {
         // task didn't launch
-        results.exitCode = -1
-        return results
+        return CLIResults(exitCode: -1)
     }
     
     // Wait for process to complete
@@ -128,12 +150,39 @@ func runCliAsync(_ tool: String,
         await Task.yield()
     }
 
-    results.exitCode = Int(task.terminationStatus)
+    exitCode = Int(task.terminationStatus)
 
-    results.stdout = trimTrailingNewline(results.stdout)
-    results.stderr = trimTrailingNewline(results.stderr)
+    let output = await accumulator.getOutput()
+    return CLIResults(
+        exitCode: exitCode,
+        stdout: trimTrailingNewline(output.stdout),
+        stderr: trimTrailingNewline(output.stderr)
+    )
+}
 
-    return results
+/// Thread-safe accumulator using locks for synchronous CLI
+private final class SynchronousOutputAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _stdout: String = ""
+    private var _stderr: String = ""
+    
+    func appendStdout(_ text: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        _stdout.append(text)
+    }
+    
+    func appendStderr(_ text: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        _stderr.append(text)
+    }
+    
+    func getOutput() -> (stdout: String, stderr: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (_stdout, _stderr)
+    }
 }
 
 /// Runs a command line tool synchronously, returns CLIResults
@@ -142,7 +191,8 @@ func runCLI(_ tool: String,
             environment: [String: String] = [:],
             stdIn: String = "") -> CLIResults
 {
-    var results = CLIResults()
+    let accumulator = SynchronousOutputAccumulator()
+    var exitCode: Int = 0
 
     let task = Process()
     task.executableURL = URL(fileURLWithPath: tool)
@@ -157,8 +207,8 @@ func runCLI(_ tool: String,
         let data = fh.availableData
         if data.isEmpty { // EOF on the pipe
             outputPipe.fileHandleForReading.readabilityHandler = nil
-        } else {
-            results.stdout.append(String(data: data, encoding: .utf8)!)
+        } else if let text = String(data: data, encoding: .utf8) {
+            accumulator.appendStdout(text)
         }
     }
     let errorPipe = Pipe()
@@ -166,8 +216,8 @@ func runCLI(_ tool: String,
         let data = fh.availableData
         if data.isEmpty { // EOF on the pipe
             errorPipe.fileHandleForReading.readabilityHandler = nil
-        } else {
-            results.stderr.append(String(data: data, encoding: .utf8)!)
+        } else if let text = String(data: data, encoding: .utf8) {
+            accumulator.appendStderr(text)
         }
     }
     let inputPipe = Pipe()
@@ -188,8 +238,7 @@ func runCLI(_ tool: String,
         try task.run()
     } catch {
         // task didn't launch
-        results.exitCode = -1
-        return results
+        return CLIResults(exitCode: -1)
     }
     
     // task.waitUntilExit()
@@ -205,10 +254,12 @@ func runCLI(_ tool: String,
         usleep(10000)
     }
 
-    results.exitCode = Int(task.terminationStatus)
+    exitCode = Int(task.terminationStatus)
 
-    results.stdout = trimTrailingNewline(results.stdout)
-    results.stderr = trimTrailingNewline(results.stderr)
-
-    return results
+    let output = accumulator.getOutput()
+    return CLIResults(
+        exitCode: exitCode,
+        stdout: trimTrailingNewline(output.stdout),
+        stderr: trimTrailingNewline(output.stderr)
+    )
 }
