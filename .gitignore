@@ -17,4 +17,5 @@ DerivedData/
 munkipkg/version.swift
 
 # Environment configuration (may contain secrets)
+.Environment
 .env
