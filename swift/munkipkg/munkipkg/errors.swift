@@ -53,6 +53,12 @@ class BuildFailedError: MunkiPkgError {
     }
 }
 
+class MissingBomFileError: MunkiPkgError {
+    init(_ description: String = "Missing BOM file") {
+        super.init(description, exitCode: 6)
+    }
+}
+
 // Convenience extensions for throwing different error types
 extension MunkiPkgError {
     static func projectExists(_ description: String) -> ProjectExistsError {
@@ -69,6 +75,10 @@ extension MunkiPkgError {
     
     static func buildFailed(_ description: String) -> BuildFailedError {
         return BuildFailedError(description)
+    }
+    
+    static func missingBomFile(_ description: String) -> MissingBomFileError {
+        return MissingBomFileError(description)
     }
 }
 

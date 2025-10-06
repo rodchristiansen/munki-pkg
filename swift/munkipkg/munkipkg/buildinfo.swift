@@ -8,13 +8,25 @@
 import Foundation
 import Yams
 
-public class BuildInfoError: MunkiPkgError {}
+public final class BuildInfoError: MunkiPkgError, @unchecked Sendable {
+    public override init(_ message: String = "Build info error", exitCode: Int = 1) {
+        super.init(message, exitCode: exitCode)
+    }
+}
 
-public class BuildInfoReadError: BuildInfoError {}
+public final class BuildInfoReadError: MunkiPkgError, @unchecked Sendable {
+    public override init(_ message: String = "Build info read error", exitCode: Int = 1) {
+        super.init(message, exitCode: exitCode)
+    }
+}
 
-public class BuildInfoWriteError: BuildInfoError {}
+public final class BuildInfoWriteError: MunkiPkgError, @unchecked Sendable {
+    public override init(_ message: String = "Build info write error", exitCode: Int = 1) {
+        super.init(message, exitCode: exitCode)
+    }
+}
 
-public struct SigningInfo: Codable {
+public struct SigningInfo: Codable, Sendable {
     var identity: String
     var keychain: String?
     var additionalCertNames: [String]?
@@ -28,7 +40,7 @@ public struct SigningInfo: Codable {
     }
 }
 
-public struct NotarizationInfo: Codable {
+public struct NotarizationInfo: Codable, Sendable {
     var appleId: String?
     var teamId: String?
     var password: String?
@@ -46,24 +58,24 @@ public struct NotarizationInfo: Codable {
     }
 }
 
-public enum Ownership: String, Codable {
+public enum Ownership: String, Codable, Sendable {
     case recommended = "recommended"
     case preserve = "preserve"
     case preserveOther = "preserve-other"
 }
 
-public enum PostInstallAction: String, Codable {
+public enum PostInstallAction: String, Codable, Sendable {
     case none = "none"
     case logout = "logout"
     case restart = "restart"
 }
 
-public enum CompressionOption: String, Codable {
+public enum CompressionOption: String, Codable, Sendable {
     case legacy = "legacy"
     case latest = "latest"
 }
 
-public struct BuildInfo: Codable {
+public struct BuildInfo: Codable, Sendable {
     var name: String = ""
     var identifier: String = ""
     var version: String = "1.0"
@@ -104,58 +116,78 @@ public struct BuildInfo: Codable {
         // Default initializer with default values already set
     }
     
-    public init(fromPlistData data: Data) throws {
+    public init(fromPlistData data: Data) throws(BuildInfoReadError) {
         let decoder = PropertyListDecoder()
-        self = try decoder.decode(BuildInfo.self, from: data)
+        do {
+            self = try decoder.decode(BuildInfo.self, from: data)
+        } catch {
+            throw BuildInfoReadError("Failed to decode plist: \(error.localizedDescription)")
+        }
     }
     
-    public init(fromPlistString plistString: String) throws {
+    public init(fromPlistString plistString: String) throws(BuildInfoReadError) {
         let decoder = PropertyListDecoder()
-        if let data = plistString.data(using: .utf8) {
-            self = try decoder.decode(BuildInfo.self, from: data)
-        } else {
+        guard let data = plistString.data(using: .utf8) else {
             throw BuildInfoReadError("Invalid plist string")
         }
-    }
-    
-    public init(fromJsonData data: Data) throws {
-        let decoder = JSONDecoder()
-        self = try decoder.decode(BuildInfo.self, from: data)
-    }
-    
-    public init(fromJsonString jsonString: String) throws {
-        let decoder = JSONDecoder()
-        if let data = jsonString.data(using: .utf8) {
+        do {
             self = try decoder.decode(BuildInfo.self, from: data)
-        } else {
-            throw BuildInfoReadError("Invalid json string")
+        } catch {
+            throw BuildInfoReadError("Failed to decode plist: \(error.localizedDescription)")
         }
     }
     
-    public init(fromYamlData data: Data) throws {
+    public init(fromJsonData data: Data) throws(BuildInfoReadError) {
+        let decoder = JSONDecoder()
+        do {
+            self = try decoder.decode(BuildInfo.self, from: data)
+        } catch {
+            throw BuildInfoReadError("Failed to decode JSON: \(error.localizedDescription)")
+        }
+    }
+    
+    public init(fromJsonString jsonString: String) throws(BuildInfoReadError) {
+        let decoder = JSONDecoder()
+        guard let data = jsonString.data(using: .utf8) else {
+            throw BuildInfoReadError("Invalid json string")
+        }
+        do {
+            self = try decoder.decode(BuildInfo.self, from: data)
+        } catch {
+            throw BuildInfoReadError("Failed to decode JSON: \(error.localizedDescription)")
+        }
+    }
+    
+    public init(fromYamlData data: Data) throws(BuildInfoReadError) {
         guard let yamlString = String(data: data, encoding: .utf8) else {
             throw BuildInfoReadError("Invalid YAML data encoding")
         }
         let decoder = YAMLDecoder()
-        self = try decoder.decode(BuildInfo.self, from: yamlString)
+        do {
+            self = try decoder.decode(BuildInfo.self, from: yamlString)
+        } catch {
+            throw BuildInfoReadError("Failed to decode YAML: \(error.localizedDescription)")
+        }
     }
     
-    public init(fromYamlString yamlString: String) throws {
+    public init(fromYamlString yamlString: String) throws(BuildInfoReadError) {
         let decoder = YAMLDecoder()
-        self = try decoder.decode(BuildInfo.self, from: yamlString)
+        do {
+            self = try decoder.decode(BuildInfo.self, from: yamlString)
+        } catch {
+            throw BuildInfoReadError("Failed to decode YAML: \(error.localizedDescription)")
+        }
     }
     
-    public init(fromFile filename: String) throws {
+    public init(fromFile filename: String) throws(BuildInfoReadError) {
         guard let data = NSData(contentsOfFile: filename) as? Data else {
             throw BuildInfoReadError("Could not read data from file")
         }
         let ext = (filename as NSString).pathExtension
         if ext == "plist" {
-            let decoder = PropertyListDecoder()
-            self = try decoder.decode(BuildInfo.self, from: data)
+            self = try BuildInfo(fromPlistData: data)
         } else if ext == "json" {
-            let decoder = JSONDecoder()
-            self = try decoder.decode(BuildInfo.self, from: data)
+            self = try BuildInfo(fromJsonData: data)
         } else if ["yaml", "yml"].contains(ext) {
             self = try BuildInfo(fromYamlData: data)
         } else {
@@ -169,38 +201,61 @@ public struct BuildInfo: Codable {
         }
     }
     
-    func jsonData() throws -> Data {
+    func jsonData() throws(BuildInfoWriteError) -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(self)
+        do {
+            return try encoder.encode(self)
+        } catch {
+            throw BuildInfoWriteError("Failed to encode JSON: \(error.localizedDescription)")
+        }
     }
     
-    func jsonString() throws -> String {
-        return String(data: try jsonData(), encoding: .utf8)!
+    func jsonString() throws(BuildInfoWriteError) -> String {
+        let data = try jsonData()
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw BuildInfoWriteError("Failed to convert JSON data to string")
+        }
+        return string
     }
     
-    func plistData() throws -> Data {
+    func plistData() throws(BuildInfoWriteError) -> Data {
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .xml
-        return try encoder.encode(self)
+        do {
+            return try encoder.encode(self)
+        } catch {
+            throw BuildInfoWriteError("Failed to encode plist: \(error.localizedDescription)")
+        }
     }
     
-    func plistString() throws -> String {
-        return String(data: try plistData(), encoding: .utf8)!
+    func plistString() throws(BuildInfoWriteError) -> String {
+        let data = try plistData()
+        guard let string = String(data: data, encoding: .utf8) else {
+            throw BuildInfoWriteError("Failed to convert plist data to string")
+        }
+        return string
     }
     
-    func yamlData() throws -> Data {
+    func yamlData() throws(BuildInfoWriteError) -> Data {
         let yamlString = try yamlString()
-        return yamlString.data(using: .utf8)!
+        guard let data = yamlString.data(using: .utf8) else {
+            throw BuildInfoWriteError("Failed to convert YAML string to data")
+        }
+        return data
     }
     
-    func yamlString() throws -> String {
+    func yamlString() throws(BuildInfoWriteError) -> String {
         let encoder = YAMLEncoder()
-        return try encoder.encode(self)
+        do {
+            return try encoder.encode(self)
+        } catch {
+            throw BuildInfoWriteError("Failed to encode YAML: \(error.localizedDescription)")
+        }
     }
 }
 
-public func getBuildInfo(projectDir: String, format: String = "") throws -> BuildInfo {
+public func getBuildInfo(projectDir: String, format: String = "") throws(BuildInfoReadError) -> BuildInfo {
     var filetype = ""
     let filenameWithoutExtension = (projectDir as NSString).appendingPathComponent("build-info")
     if format != "" {
