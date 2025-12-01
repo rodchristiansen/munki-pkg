@@ -70,6 +70,10 @@ struct BuildOptions: ParsableArguments {
     @Flag(name: .long,
           help: "Skips the stapling part of notarization process when notarization is specified in build-info")
     var skipStapling = false
+    
+    @Option(name: .long,
+            help: ArgumentHelp("Path to .env file containing environment variables to inject into scripts. If not specified, auto-detects .env in project directory.", valueName: "path"))
+    var env: String?
 }
 
 struct CreateAndImportOptions: ParsableArguments {

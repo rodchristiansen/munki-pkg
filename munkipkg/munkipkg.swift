@@ -8,6 +8,14 @@
 import ArgumentParser
 import Foundation
 
+// Version number for munkipkg (dynamically generated timestamp format: YYYY.MM.DD.HHMM)
+private var VERSION: String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy.MM.dd.HHmm"
+    formatter.timeZone = TimeZone.current
+    return formatter.string(from: Date())
+}
+
 // Default .gitignore content for new projects
 private let GITIGNORE_DEFAULT = """
 # .DS_Store files!
@@ -15,6 +23,9 @@ private let GITIGNORE_DEFAULT = """
 
 # our build directory
 build/
+
+# Environment files containing secrets
+.env
 """
 
 // Helper for printing to stderr
@@ -731,14 +742,44 @@ struct MunkiPkg: AsyncParsableCommand {
         // Load build info
         let buildInfo = try loadBuildInfo(from: projectURL)
         
+        // Load environment variables for secret injection
+        let envVars = try loadEnvironmentVariables(for: projectURL)
+        if !envVars.isEmpty && !additionalOptions.quiet {
+            print("munkipkg: Loaded \(envVars.count) environment variable(s) for script injection")
+        }
+        
         // Build the package
-        let outputPath = try await performBuild(projectURL: projectURL, buildInfo: buildInfo)
+        let outputPath = try await performBuild(projectURL: projectURL, buildInfo: buildInfo, envVars: envVars)
         
         if buildOptions.exportBomInfo {
             try await exportBom(for: projectURL, buildInfo: buildInfo)
         }
         
         print("Package built successfully: \(outputPath)")
+    }
+    
+    /// Load environment variables from .env file
+    /// - Parameter projectURL: URL to the project directory
+    /// - Returns: Dictionary of environment variable key-value pairs
+    private func loadEnvironmentVariables(for projectURL: URL) throws -> [String: String] {
+        // Determine which .env file to use
+        let envFilePath: String
+        if let customEnvPath = buildOptions.env {
+            // Use explicitly specified path
+            envFilePath = customEnvPath
+            if !FileManager.default.fileExists(atPath: envFilePath) {
+                throw MunkiPkgError("Specified environment file does not exist: \(envFilePath)")
+            }
+        } else {
+            // Auto-detect .env in project directory
+            envFilePath = projectURL.appendingPathComponent(".env").path
+        }
+        
+        // Load variables from file
+        let envFileVars = try EnvLoader.load(from: envFilePath)
+        
+        // Merge with system environment (MUNKIPKG_ prefixed only)
+        return EnvLoader.merge(envFileVars: envFileVars, includeSysEnv: true)
     }
     
     private func loadBuildInfo(from projectURL: URL) throws -> BuildInfo {
@@ -758,14 +799,14 @@ struct MunkiPkg: AsyncParsableCommand {
         throw MunkiPkgError.invalidProject("No build-info file found")
     }
     
-    private func performBuild(projectURL: URL, buildInfo: BuildInfo) async throws -> String {
+    private func performBuild(projectURL: URL, buildInfo: BuildInfo, envVars: [String: String] = [:]) async throws -> String {
         // Create build directory
         let buildDir = projectURL.appendingPathComponent("build")
         if !FileManager.default.fileExists(atPath: buildDir.path) {
             try FileManager.default.createDirectory(at: buildDir, withIntermediateDirectories: true)
         }
         
-        // Create temp directory for component plist and pkginfo if needed
+        // Create temp directory for component plist, pkginfo, and processed scripts if needed
         let tempDir = buildDir.appendingPathComponent("tmp")
         if !FileManager.default.fileExists(atPath: tempDir.path) {
             try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -810,10 +851,28 @@ struct MunkiPkg: AsyncParsableCommand {
             pkgbuildArgs.append(contentsOf: ["--ownership", ownership.rawValue])
         }
         
-        // Add scripts if they exist
+        // Add scripts if they exist - process with env var substitution if needed
         let scriptsPath = projectURL.appendingPathComponent("scripts").path
         if FileManager.default.fileExists(atPath: scriptsPath) {
-            pkgbuildArgs.append(contentsOf: ["--scripts", scriptsPath])
+            // If we have environment variables, process scripts with placeholder replacement
+            if !envVars.isEmpty {
+                if let processedScriptsPath = try PlaceholderReplacer.processScriptsDirectory(
+                    at: scriptsPath,
+                    with: envVars,
+                    tempDir: tempDir.path
+                ) {
+                    if !additionalOptions.quiet {
+                        print("munkipkg: Processed scripts with environment variable substitution")
+                    }
+                    pkgbuildArgs.append(contentsOf: ["--scripts", processedScriptsPath])
+                } else {
+                    // No scripts needed processing, use original
+                    pkgbuildArgs.append(contentsOf: ["--scripts", scriptsPath])
+                }
+            } else {
+                // No env vars, use original scripts
+                pkgbuildArgs.append(contentsOf: ["--scripts", scriptsPath])
+            }
         }
         
         pkgbuildArgs.append(componentPackagePath)

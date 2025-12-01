@@ -283,6 +283,82 @@ If there is no payload folder at all, `pkgbuild` is called with the `--nopayload
 
 If the payload folder exists, but is empty, you'll get a "pseudo-payload-free" package. No files will be installed, but a receipt will be left. This is often the more useful option if you need to track if the package has been installed on machines you manage.
 
+### Environment Variables and Secret Injection
+
+munkipkg supports injecting secrets and configuration values into pre/postinstall scripts via `.env` files. This is useful for:
+
+- API keys and authentication tokens
+- Webhook URLs
+- Service account credentials
+- Environment-specific configuration
+
+#### Using .env files
+
+Create a `.env` file in your package project directory:
+
+```
+project_dir/
+    .env              # Environment variables (DO NOT commit to git!)
+    .env.example      # Template for team members
+    build-info.plist
+    payload/
+    scripts/
+```
+
+The `.env` file uses a simple `KEY=VALUE` format:
+
+```bash
+# API credentials (comments are supported)
+API_KEY=your-secret-api-key-here
+WEBHOOK_URL=https://your-server.com/webhook
+
+# Quoted values are supported
+SERVICE_ACCOUNT="admin@example.com"
+```
+
+#### Placeholder patterns in scripts
+
+munkipkg supports multiple placeholder patterns in your scripts. Use whichever style fits your needs:
+
+| Pattern | Example | Description |
+|---------|---------|-------------|
+| Shell style | `${API_KEY}` | Standard shell variable syntax |
+| Mustache style | `{{API_KEY}}` | Template-style placeholders |
+| Legacy style | `API_KEY_PLACEHOLDER` | Explicit placeholder suffix |
+| XML-safe style | `__API_KEY__` | Safe for use in plist/XML files |
+
+Example postinstall script:
+
+```bash
+#!/bin/bash
+
+# Configure the application with injected secrets
+defaults write /Library/Preferences/com.example.myapp APIKey -string "${API_KEY}"
+defaults write /Library/Preferences/com.example.myapp WebhookURL -string "{{WEBHOOK_URL}}"
+
+# Call an API endpoint
+curl -X POST "{{WEBHOOK_URL}}" \
+     -H "Authorization: Bearer ${API_KEY}" \
+     -d '{"status": "installed"}'
+
+exit 0
+```
+
+#### Specifying a custom .env file
+
+By default, munkipkg looks for a `.env` file in the project directory. You can specify a different path:
+
+```bash
+munkipkg --env /path/to/production.env my-package-project
+```
+
+#### Security considerations
+
+- **Never commit `.env` files to version control!** The default `.gitignore` excludes `.env` automatically.
+- Create a `.env.example` template with placeholder values for team members.
+- Use separate `.env` files for different environments (development, staging, production).
+- Consider using a secrets manager and generating `.env` files dynamically in CI/CD pipelines.
+
 ### Package signing
 
 You may sign packages as part of the build process by adding a signing\_info dictionary to the build\_info.plist:
