@@ -25,9 +25,9 @@ struct ActionOptions: ParsableArguments {
           help: "Use Bom.txt in the project at <project-path> to set modes of files in payload directory and create missing empty directories. Useful after a git clone or pull.")
     var sync = false
 
-    @Option(name: .long,
-            help: ArgumentHelp("Migrate build-info file(s) to specified format (plist, json, or yaml). Can be used on a single project or a parent directory containing multiple projects.", valueName: "format"))
-    var migrate: String?
+    @Flag(name: .long,
+          help: "Convert build-info file(s) to a different format. Use with --to-yaml, --to-plist, or --to-json.")
+    var convert = false
 
     @Argument(help: "Path to package project directory.")
     var projectPath: String = ""
@@ -38,22 +38,14 @@ struct ActionOptions: ParsableArguments {
         if create { actionCount += 1 }
         if importPath != nil { actionCount += 1 }
         if sync { actionCount += 1 }
-        if migrate != nil { actionCount += 1 }
+        if convert { actionCount += 1 }
         if actionCount == 0 {
             // default to build
             build = true
             actionCount = 1
         }
         if actionCount != 1 {
-            throw ValidationError("One (and only one) of --build, --create, --import, --sync, or --migrate must be specified.")
-        }
-        
-        // Validate migrate format if specified
-        if let format = migrate {
-            let validFormats = ["plist", "json", "yaml", "yml"]
-            if !validFormats.contains(format.lowercased()) {
-                throw ValidationError("Invalid format '\(format)'. Must be one of: plist, json, yaml")
-            }
+            throw ValidationError("One (and only one) of --build, --create, --import, --sync, or --convert must be specified.")
         }
     }
 }
@@ -93,6 +85,28 @@ struct CreateAndImportOptions: ParsableArguments {
         if json && yaml {
             throw ValidationError("Only one of --json and --yaml can be specified.")
         }
+    }
+}
+
+struct ConvertOptions: ParsableArguments {
+    @Flag(name: .long,
+          help: "Convert build-info to YAML format.")
+    var toYaml = false
+
+    @Flag(name: .long,
+          help: "Convert build-info to plist format.")
+    var toPlist = false
+
+    @Flag(name: .long,
+          help: "Convert build-info to JSON format.")
+    var toJson = false
+
+    @Flag(name: .long,
+          help: "Show what would be done without making changes.")
+    var dryRun = false
+
+    mutating func validate() throws {
+        // Validation happens in main command when --convert is used
     }
 }
 
