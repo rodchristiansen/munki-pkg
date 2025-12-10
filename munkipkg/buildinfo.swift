@@ -196,6 +196,21 @@ public struct BuildInfo: Codable, Sendable {
     }
     
     public mutating func doSubstitutions() {
+        // Process dynamic version placeholders in the version field first
+        // ${TIMESTAMP} -> YYYY.MM.DD.HHMM (e.g., 2025.12.09.1455)
+        if version.contains("${TIMESTAMP}") {
+            version = version.replacingOccurrences(of: "${TIMESTAMP}", with: DynamicVersion.timestamp)
+        }
+        // ${DATE} -> YYYY.MM.DD (e.g., 2025.12.09)
+        if version.contains("${DATE}") {
+            version = version.replacingOccurrences(of: "${DATE}", with: DynamicVersion.date)
+        }
+        // ${DATETIME} -> YYYY.MM.DD.HHMMSS (e.g., 2025.12.09.145530)
+        if version.contains("${DATETIME}") {
+            version = version.replacingOccurrences(of: "${DATETIME}", with: DynamicVersion.datetime)
+        }
+        
+        // Now process name substitutions (version has been resolved)
         if name.contains("${version}") {
             name = name.replacingOccurrences(of: "${version}", with: version)
         }
@@ -279,4 +294,28 @@ public func getBuildInfo(projectDir: String, format: String = "") throws(BuildIn
     var buildinfo = try BuildInfo(fromFile: filename)
     buildinfo.doSubstitutions()
     return buildinfo
+}
+
+/// Generates dynamic date/time based version strings
+public struct DynamicVersion: Sendable {
+    /// Current date formatted as YYYY.MM.DD.HHMM (e.g., 2025.12.09.1455)
+    public static var timestamp: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy.MM.dd.HHmm"
+        return formatter.string(from: Date())
+    }
+    
+    /// Current date formatted as YYYY.MM.DD (e.g., 2025.12.09)
+    public static var date: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy.MM.dd"
+        return formatter.string(from: Date())
+    }
+    
+    /// Current date/time formatted as YYYY.MM.DD.HHMMSS (e.g., 2025.12.09.145530)
+    public static var datetime: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy.MM.dd.HHmmss"
+        return formatter.string(from: Date())
+    }
 }

@@ -194,4 +194,68 @@ struct BuildInfoTests {
         buildInfo.doSubstitutions()
         #expect(buildInfo.name == "python-modernize-0.7.pkg")
     }
+    
+    @Test func dynamicVersionTimestamp() async throws {
+        var buildInfo = BuildInfo()
+        buildInfo.version = "${TIMESTAMP}"
+        buildInfo.name = "test-${version}.pkg"
+        buildInfo.doSubstitutions()
+        
+        // Version should be in YYYY.MM.DD.HHMM format
+        let versionPattern = #/^\d{4}\.\d{2}\.\d{2}\.\d{4}$/#
+        #expect(buildInfo.version.contains(versionPattern))
+        // Name should contain the resolved version
+        #expect(buildInfo.name.hasPrefix("test-"))
+        #expect(buildInfo.name.hasSuffix(".pkg"))
+        #expect(!buildInfo.name.contains("${"))
+    }
+    
+    @Test func dynamicVersionDate() async throws {
+        var buildInfo = BuildInfo()
+        buildInfo.version = "${DATE}"
+        buildInfo.doSubstitutions()
+        
+        // Version should be in YYYY.MM.DD format
+        let versionPattern = #/^\d{4}\.\d{2}\.\d{2}$/#
+        #expect(buildInfo.version.contains(versionPattern))
+    }
+    
+    @Test func dynamicVersionDatetime() async throws {
+        var buildInfo = BuildInfo()
+        buildInfo.version = "${DATETIME}"
+        buildInfo.doSubstitutions()
+        
+        // Version should be in YYYY.MM.DD.HHMMSS format
+        let versionPattern = #/^\d{4}\.\d{2}\.\d{2}\.\d{6}$/#
+        #expect(buildInfo.version.contains(versionPattern))
+    }
+    
+    @Test func dynamicVersionWithPrefix() async throws {
+        var buildInfo = BuildInfo()
+        buildInfo.version = "v${DATE}-build"
+        buildInfo.doSubstitutions()
+        
+        // Version should start with "v" and end with "-build"
+        #expect(buildInfo.version.hasPrefix("v"))
+        #expect(buildInfo.version.hasSuffix("-build"))
+        #expect(!buildInfo.version.contains("${"))
+    }
+    
+    @Test func dynamicVersionHelper() async throws {
+        // Test DynamicVersion helper directly
+        let timestamp = DynamicVersion.timestamp
+        let date = DynamicVersion.date
+        let datetime = DynamicVersion.datetime
+        
+        // Verify formats
+        #expect(timestamp.count == 15) // YYYY.MM.DD.HHMM
+        #expect(date.count == 10) // YYYY.MM.DD
+        #expect(datetime.count == 17) // YYYY.MM.DD.HHMMSS
+        
+        // Verify they start with the current year
+        let currentYear = Calendar.current.component(.year, from: Date())
+        #expect(timestamp.hasPrefix("\(currentYear)."))
+        #expect(date.hasPrefix("\(currentYear)."))
+        #expect(datetime.hasPrefix("\(currentYear)."))
+    }
 }
