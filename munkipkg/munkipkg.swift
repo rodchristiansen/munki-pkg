@@ -8,14 +8,6 @@
 import ArgumentParser
 import Foundation
 
-// Version number for munkipkg (dynamically generated timestamp format: YYYY.MM.DD.HHMM)
-private var VERSION: String {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy.MM.dd.HHmm"
-    formatter.timeZone = TimeZone.current
-    return formatter.string(from: Date())
-}
-
 // Default .gitignore content for new projects
 private let GITIGNORE_DEFAULT = """
 # .DS_Store files!
@@ -640,7 +632,9 @@ struct MunkiPkg: AsyncParsableCommand {
         
         for path in possiblePaths {
             if FileManager.default.fileExists(atPath: path.path) {
-                return try BuildInfo(fromFile: path.path)
+                var buildInfo = try BuildInfo(fromFile: path.path)
+                buildInfo.doSubstitutions()
+                return buildInfo
             }
         }
         
