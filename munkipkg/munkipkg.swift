@@ -596,6 +596,11 @@ struct MunkiPkg: AsyncParsableCommand {
         }
         
         print("Package built successfully: \(outputPath)")
+        
+        // Prompt to import into repo using munkiimport
+        if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: true) {
+            try await runMunkiimport(packagePath: outputPath)
+        }
     }
     
     /// Load environment variables from .env file
@@ -905,6 +910,47 @@ struct MunkiPkg: AsyncParsableCommand {
         if result.exitCode == 0 {
             try result.stdout.write(toFile: bomPath, atomically: true, encoding: String.Encoding.utf8)
             print("BOM info exported to: \(bomPath)")
+        }
+    }
+    
+    // MARK: - Munkiimport functionality
+    
+    /// Prompts the user for a yes/no response
+    /// - Parameters:
+    ///   - message: The prompt message to display
+    ///   - defaultYes: Whether 'yes' is the default (Y/n vs y/N)
+    /// - Returns: True if user confirms, false otherwise
+    private func promptYesNo(_ message: String, defaultYes: Bool = true) async throws -> Bool {
+        let promptSuffix = defaultYes ? " [Y/n]: " : " [y/N]: "
+        print(message + promptSuffix, terminator: "")
+        
+        guard let response = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return defaultYes
+        }
+        
+        if response.isEmpty {
+            return defaultYes
+        }
+        
+        return response == "y" || response == "yes"
+    }
+    
+    /// Runs munkiimport on the specified package
+    /// - Parameter packagePath: Path to the package to import
+    private func runMunkiimport(packagePath: String) async throws {
+        print("\nmunkipkg: Running munkiimport \(packagePath)")
+        
+        let result = await runCliAsync("/usr/local/munki/munkiimport", arguments: [packagePath])
+        
+        print(result.stdout, terminator: "")
+        if !result.stderr.isEmpty {
+            printStderr(result.stderr)
+        }
+        
+        if result.exitCode != 0 {
+            print("munkipkg: munkiimport failed with exit code \(result.exitCode)")
+        } else {
+            print("munkipkg: Successfully imported package to repo")
         }
     }
 }
