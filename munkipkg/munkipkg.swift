@@ -662,8 +662,19 @@ struct MunkiPkg: AsyncParsableCommand {
             try? FileManager.default.removeItem(at: tempDir)
         }
         
-        // Generate component property list if needed
-        let componentPlistPath = try await makeComponentPropertyList(buildInfo: buildInfo, tempDir: tempDir)
+        // Check if payload directory exists and has contents
+        let payloadPath = projectURL.appendingPathComponent("payload")
+        var isDirectory: ObjCBool = false
+        let payloadExists = FileManager.default.fileExists(atPath: payloadPath.path, isDirectory: &isDirectory)
+        let hasPayload = payloadExists && isDirectory.boolValue
+        
+        // Generate component property list if needed (only if payload exists)
+        let componentPlistPath: URL?
+        if hasPayload {
+            componentPlistPath = try await makeComponentPropertyList(buildInfo: buildInfo, tempDir: tempDir)
+        } else {
+            componentPlistPath = nil
+        }
         
         // Generate PackageInfo if needed
         let pkginfoPath = try makePkgInfo(buildInfo: buildInfo, tempDir: tempDir)
@@ -672,14 +683,35 @@ struct MunkiPkg: AsyncParsableCommand {
         let componentPackagePath = buildDir.appendingPathComponent(packageName).path
         
         // Build component package with pkgbuild
-        var pkgbuildArgs = [
-            "--root", projectURL.appendingPathComponent("payload").path,
+        var pkgbuildArgs: [String] = []
+        var useNoPayload = false
+        
+        // Determine if we should use --nopayload or --root
+        if hasPayload {
+            // Check if payload directory has any contents
+            let payloadContents = try? FileManager.default.contentsOfDirectory(atPath: payloadPath.path)
+            if let contents = payloadContents, !contents.isEmpty {
+                // Payload has contents, use --root
+                pkgbuildArgs.append(contentsOf: ["--root", payloadPath.path])
+            } else {
+                // Payload exists but is empty, use --nopayload
+                pkgbuildArgs.append("--nopayload")
+                useNoPayload = true
+            }
+        } else {
+            // Payload directory doesn't exist, use --nopayload
+            pkgbuildArgs.append("--nopayload")
+            useNoPayload = true
+        }
+        
+        // Add identifier and version
+        pkgbuildArgs.append(contentsOf: [
             "--identifier", buildInfo.identifier,
             "--version", buildInfo.version
-        ]
+        ])
         
-        // Add component plist if we created one
-        if let componentPlist = componentPlistPath {
+        // Add component plist if we created one (only valid with --root)
+        if !useNoPayload, let componentPlist = componentPlistPath {
             pkgbuildArgs.append(contentsOf: ["--component-plist", componentPlist.path])
         }
         
@@ -688,8 +720,8 @@ struct MunkiPkg: AsyncParsableCommand {
             pkgbuildArgs.append(contentsOf: ["--info", pkginfo.path])
         }
         
-        // Add install location if specified
-        if let installLocation = buildInfo.installLocation {
+        // Add install location if specified (only valid with --root)
+        if !useNoPayload, let installLocation = buildInfo.installLocation {
             pkgbuildArgs.append(contentsOf: ["--install-location", installLocation])
         }
         
