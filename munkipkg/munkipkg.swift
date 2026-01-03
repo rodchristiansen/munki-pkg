@@ -970,19 +970,46 @@ struct MunkiPkg: AsyncParsableCommand {
     /// Runs munkiimport on the specified package
     /// - Parameter packagePath: Path to the package to import
     private func runMunkiimport(packagePath: String) async throws {
-        print("\nmunkipkg: Running munkiimport \(packagePath)")
+        print("\nmunkipkg: Running munkiimport \(packagePath)\n")
+        fflush(stdout)
         
-        let result = await runCliAsync("/usr/local/munki/munkiimport", arguments: [packagePath])
+        // Use posix_spawn to run munkiimport with full terminal access
+        var pid: pid_t = 0
+        let path = "/usr/local/munki/munkiimport"
+        let argv: [UnsafeMutablePointer<CChar>?] = [
+            strdup(path),
+            strdup(packagePath),
+            nil
+        ]
         
-        print(result.stdout, terminator: "")
-        if !result.stderr.isEmpty {
-            printStderr(result.stderr)
+        // Create file actions to inherit stdin/stdout/stderr
+        var fileActions: posix_spawn_file_actions_t? = nil
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_addinherit_np(&fileActions, STDIN_FILENO)
+        posix_spawn_file_actions_addinherit_np(&fileActions, STDOUT_FILENO)
+        posix_spawn_file_actions_addinherit_np(&fileActions, STDERR_FILENO)
+        
+        let status = posix_spawn(&pid, path, &fileActions, nil, argv, environ)
+        
+        // Clean up argv
+        for arg in argv {
+            free(arg)
+        }
+        posix_spawn_file_actions_destroy(&fileActions)
+        
+        guard status == 0 else {
+            throw MunkiPkgError("Failed to spawn munkiimport: \(status)")
         }
         
-        if result.exitCode != 0 {
-            print("munkipkg: munkiimport failed with exit code \(result.exitCode)")
+        // Wait for child process to complete
+        var childStatus: Int32 = 0
+        waitpid(pid, &childStatus, 0)
+        
+        let exitCode = (childStatus >> 8) & 0xFF
+        if exitCode != 0 {
+            print("\nmunkipkg: munkiimport failed with exit code \(exitCode)")
         } else {
-            print("munkipkg: Successfully imported package to repo")
+            print("\nmunkipkg: Successfully imported package to repo")
         }
     }
 }
