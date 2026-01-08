@@ -598,7 +598,7 @@ struct MunkiPkg: AsyncParsableCommand {
         print("Package built successfully: \(outputPath)")
         
         // Prompt to import into repo using munkiimport
-        if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: true) {
+        if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: false) {
             try await runMunkiimport(packagePath: outputPath)
         }
     }
@@ -952,19 +952,61 @@ struct MunkiPkg: AsyncParsableCommand {
     ///   - message: The prompt message to display
     ///   - defaultYes: Whether 'yes' is the default (Y/n vs y/N)
     /// - Returns: True if user confirms, false otherwise
-    private func promptYesNo(_ message: String, defaultYes: Bool = true) async throws -> Bool {
+    private func promptYesNo(_ message: String, defaultYes: Bool = true, timeout: TimeInterval = 60.0) async throws -> Bool {
         let promptSuffix = defaultYes ? " [Y/n]: " : " [y/N]: "
         print(message + promptSuffix, terminator: "")
+        fflush(stdout)
         
-        guard let response = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
-            return defaultYes
+        // Thread-safe state container
+        final class ResponseState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _hasResumed = false
+            
+            var hasResumed: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return _hasResumed
+            }
+            
+            func setResumed() -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                if !_hasResumed {
+                    _hasResumed = true
+                    return true
+                }
+                return false
+            }
         }
         
-        if response.isEmpty {
-            return defaultYes
-        }
+        let state = ResponseState()
         
-        return response == "y" || response == "yes"
+        return try await withCheckedThrowingContinuation { continuation in
+            // Start a background thread to read input
+            DispatchQueue.global(qos: .userInitiated).async {
+                let response = readLine()?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).lowercased()
+                
+                if state.setResumed() {
+                    if let userResponse = response {
+                        if userResponse.isEmpty {
+                            continuation.resume(returning: defaultYes)
+                        } else {
+                            continuation.resume(returning: userResponse == "y" || userResponse == "yes")
+                        }
+                    } else {
+                        continuation.resume(returning: defaultYes)
+                    }
+                }
+            }
+            
+            // Start timeout timer
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
+                if state.setResumed() {
+                    print("\nTimeout reached. Using default: \(defaultYes ? "Y" : "N")")
+                    continuation.resume(returning: defaultYes)
+                }
+            }
+        }
     }
     
     /// Runs munkiimport on the specified package
