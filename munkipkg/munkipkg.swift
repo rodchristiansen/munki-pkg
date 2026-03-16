@@ -947,62 +947,45 @@ struct MunkiPkg: AsyncParsableCommand {
     
     // MARK: - Munkiimport functionality
     
-    /// Prompts the user for a yes/no response
+    /// Prompts the user for a yes/no response with a timeout
     /// - Parameters:
     ///   - message: The prompt message to display
     ///   - defaultYes: Whether 'yes' is the default (Y/n vs y/N)
+    ///   - timeout: Seconds to wait before using the default (default: 60)
     /// - Returns: True if user confirms, false otherwise
     private func promptYesNo(_ message: String, defaultYes: Bool = true, timeout: TimeInterval = 60.0) async throws -> Bool {
         let promptSuffix = defaultYes ? " [Y/n]: " : " [y/N]: "
         print(message + promptSuffix, terminator: "")
         fflush(stdout)
-        
-        // Thread-safe state container
-        final class ResponseState: @unchecked Sendable {
-            private let lock = NSLock()
-            private var _hasResumed = false
-            
-            var hasResumed: Bool {
-                lock.lock()
-                defer { lock.unlock() }
-                return _hasResumed
-            }
-            
-            func setResumed() -> Bool {
-                lock.lock()
-                defer { lock.unlock() }
-                if !_hasResumed {
-                    _hasResumed = true
-                    return true
-                }
-                return false
-            }
+
+        // If stdin is not a terminal (piped/automated), return the default immediately
+        if isatty(STDIN_FILENO) == 0 {
+            print(defaultYes ? "Y" : "N")
+            return defaultYes
         }
-        
-        let state = ResponseState()
-        
-        return try await withCheckedThrowingContinuation { continuation in
-            // Start a background thread to read input
+
+        // Use poll() on stdin so the timeout is handled by the kernel
+        // rather than leaving a blocked readLine() thread alive
+        return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                let response = readLine()?.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).lowercased()
-                
-                if state.setResumed() {
-                    if let userResponse = response {
-                        if userResponse.isEmpty {
-                            continuation.resume(returning: defaultYes)
-                        } else {
-                            continuation.resume(returning: userResponse == "y" || userResponse == "yes")
-                        }
+                var fds = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+                let timeoutMs = Int32(timeout * 1000)
+                let result = Darwin.poll(&fds, 1, timeoutMs)
+
+                if result > 0, (fds.revents & Int16(POLLIN)) != 0 {
+                    // Data available — safe to call readLine() without blocking
+                    let response = readLine()?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased()
+                    if let r = response, !r.isEmpty {
+                        continuation.resume(returning: r == "y" || r == "yes")
                     } else {
                         continuation.resume(returning: defaultYes)
                     }
-                }
-            }
-            
-            // Start timeout timer
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeout) {
-                if state.setResumed() {
-                    print("\nTimeout reached. Using default: \(defaultYes ? "Y" : "N")")
+                } else {
+                    // Timeout (0) or error (-1) — use the default
+                    print("\nTimeout reached (\(Int(timeout))s). Using default: \(defaultYes ? "Y" : "N")")
+                    fflush(stdout)
                     continuation.resume(returning: defaultYes)
                 }
             }
