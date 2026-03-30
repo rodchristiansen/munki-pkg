@@ -70,6 +70,9 @@ struct MunkiPkg: AsyncParsableCommand {
             if buildOptions.skipStapling {
                 throw ValidationError("--skip-stapling only valid with --build")
             }
+            if buildOptions.skipImport {
+                throw ValidationError("--skip-import only valid with --build")
+            }
         }
 
         // action is not create or import
@@ -598,7 +601,8 @@ struct MunkiPkg: AsyncParsableCommand {
         print("Package built successfully: \(outputPath)")
         
         // Prompt to import into repo using munkiimport
-        if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: false) {
+        if !buildOptions.skipImport,
+           try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: false) {
             try await runMunkiimport(packagePath: outputPath)
         }
     }
