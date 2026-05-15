@@ -16,7 +16,9 @@ private let GITIGNORE_DEFAULT = """
 # our build directory
 build/
 
-# Environment files containing secrets
+# Environment files used for build-time variable substitution.
+# Note: any value substituted into a pre/postinstall script ends up as plain
+# text inside the built .pkg, so don't put real secrets here regardless.
 .env
 """
 
@@ -584,13 +586,10 @@ struct MunkiPkg: AsyncParsableCommand {
         
         // Load build info
         let buildInfo = try loadBuildInfo(from: projectURL)
-        
-        // Load environment variables for secret injection
+
+        // Load build-time variables from .env (and optionally system env).
         let envVars = try loadEnvironmentVariables(for: projectURL)
-        if !envVars.isEmpty && !additionalOptions.quiet {
-            print("munkipkg: Loaded \(envVars.count) environment variable(s) for script injection")
-        }
-        
+
         // Build the package
         let outputPath = try await performBuild(projectURL: projectURL, buildInfo: buildInfo, envVars: envVars)
         
@@ -607,28 +606,92 @@ struct MunkiPkg: AsyncParsableCommand {
         }
     }
     
-    /// Load environment variables from .env file
-    /// - Parameter projectURL: URL to the project directory
-    /// - Returns: Dictionary of environment variable key-value pairs
+    /// Load build-time variables from a `.env` file and merge with selected
+    /// system-environment variables. Honors `--env`, `--no-system-env`, and emits
+    /// warnings about permissive `.env` modes and git-tracked `.env` files.
     private func loadEnvironmentVariables(for projectURL: URL) throws -> [String: String] {
-        // Determine which .env file to use
         let envFilePath: String
+        let envExplicit: Bool
         if let customEnvPath = buildOptions.env {
-            // Use explicitly specified path
             envFilePath = customEnvPath
+            envExplicit = true
             if !FileManager.default.fileExists(atPath: envFilePath) {
                 throw MunkiPkgError("Specified environment file does not exist: \(envFilePath)")
             }
         } else {
-            // Auto-detect .env in project directory
             envFilePath = projectURL.appendingPathComponent(".env").path
+            envExplicit = false
         }
-        
-        // Load variables from file
+
         let envFileVars = try EnvLoader.load(from: envFilePath)
-        
-        // Merge with system environment (MUNKIPKG_ prefixed only)
-        return EnvLoader.merge(envFileVars: envFileVars, includeSysEnv: true)
+        let merged = EnvLoader.merge(envFileVars: envFileVars, includeSysEnv: !buildOptions.noSystemEnv)
+
+        if !additionalOptions.quiet {
+            if !envFileVars.isEmpty {
+                print("munkipkg: loaded \(envFileVars.count) build-time variable(s) from \(envFilePath)")
+            } else if envExplicit {
+                printStderr("WARNING: environment file \(envFilePath) contained no variables.\n")
+            }
+            if !merged.systemEnvKeys.isEmpty {
+                print("munkipkg: picked up \(merged.systemEnvKeys.count) MUNKIPKG_* var(s) from system environment: \(merged.systemEnvKeys.joined(separator: ", "))")
+            }
+            if !merged.vars.isEmpty {
+                printStderr("NOTE: substituted values are embedded as plain text inside the built .pkg. Use .env for build-time configuration, not for runtime secrets.\n")
+            }
+        }
+
+        // If a .env exists in the project, check whether it's git-tracked.
+        if !envFileVars.isEmpty {
+            warnIfEnvIsGitTracked(envPath: envFilePath, projectURL: projectURL)
+        }
+
+        return merged.vars
+    }
+
+    /// Warn if the `.env` file is tracked by git (or about to be — i.e., not ignored
+    /// and inside a git working tree). No-op outside a git repo.
+    private func warnIfEnvIsGitTracked(envPath: String, projectURL: URL) {
+        let projectPath = projectURL.path
+        // Check if this is a git repo at all.
+        let revParse = runCliSync("/usr/bin/git", arguments: ["-C", projectPath, "rev-parse", "--is-inside-work-tree"])
+        guard revParse.exitCode == 0, revParse.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "true" else {
+            return
+        }
+        // Is the file tracked?
+        let lsFiles = runCliSync("/usr/bin/git", arguments: ["-C", projectPath, "ls-files", "--error-unmatch", envPath])
+        if lsFiles.exitCode == 0 {
+            printStderr("WARNING: \(envPath) is tracked by git. Substituted values will be embedded in the .pkg AND visible in your repo history. Add `.env` to .gitignore and rotate any sensitive values that have been committed.\n")
+            return
+        }
+        // Not tracked — check whether it's ignored. If not ignored, warn (it will be tracked on next `git add .`).
+        let checkIgnore = runCliSync("/usr/bin/git", arguments: ["-C", projectPath, "check-ignore", "-q", envPath])
+        if checkIgnore.exitCode != 0 {
+            printStderr("WARNING: \(envPath) is not gitignored. A future `git add` will commit it. Add `.env` to .gitignore.\n")
+        }
+    }
+
+    /// Synchronous wrapper around runCliAsync for quick git probes.
+    private func runCliSync(_ tool: String, arguments: [String]) -> (exitCode: Int32, stdout: String, stderr: String) {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: tool)
+        proc.arguments = arguments
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+        } catch {
+            return (-1, "", "\(error)")
+        }
+        let outData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+        let errData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+        return (
+            proc.terminationStatus,
+            String(data: outData, encoding: .utf8) ?? "",
+            String(data: errData, encoding: .utf8) ?? ""
+        )
     }
     
     private func loadBuildInfo(from projectURL: URL) throws -> BuildInfo {
@@ -657,10 +720,18 @@ struct MunkiPkg: AsyncParsableCommand {
             try FileManager.default.createDirectory(at: buildDir, withIntermediateDirectories: true)
         }
         
-        // Create temp directory for component plist, pkginfo, and processed scripts if needed
+        // Create temp directory for component plist, pkginfo, and processed scripts.
+        // Mode 0700 so substituted-script copies aren't readable by other local users
+        // during the build window.
         let tempDir = buildDir.appendingPathComponent("tmp")
         if !FileManager.default.fileExists(atPath: tempDir.path) {
-            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: tempDir,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+        } else {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tempDir.path)
         }
         defer {
             try? FileManager.default.removeItem(at: tempDir)
@@ -734,26 +805,30 @@ struct MunkiPkg: AsyncParsableCommand {
             pkgbuildArgs.append(contentsOf: ["--ownership", ownership.rawValue])
         }
         
-        // Add scripts if they exist - process with env var substitution if needed
+        // Add scripts if they exist. When build-time variables are present, process the
+        // scripts in a temp copy so the originals are never modified.
         let scriptsPath = projectURL.appendingPathComponent("scripts").path
         if FileManager.default.fileExists(atPath: scriptsPath) {
-            // If we have environment variables, process scripts with placeholder replacement
-            if !envVars.isEmpty {
-                if let processedScriptsPath = try PlaceholderReplacer.processScriptsDirectory(
-                    at: scriptsPath,
-                    with: envVars,
-                    tempDir: tempDir.path
-                ) {
-                    if !additionalOptions.quiet {
-                        print("munkipkg: Processed scripts with environment variable substitution")
-                    }
-                    pkgbuildArgs.append(contentsOf: ["--scripts", processedScriptsPath])
-                } else {
-                    // No scripts needed processing, use original
-                    pkgbuildArgs.append(contentsOf: ["--scripts", scriptsPath])
+            if !envVars.isEmpty,
+               let dirResult = try PlaceholderReplacer.processScriptsDirectory(
+                   at: scriptsPath,
+                   with: envVars,
+                   tempDir: tempDir.path
+               ) {
+                if !additionalOptions.quiet {
+                    print("munkipkg: substituted build-time variables into scripts (\(dirResult.unresolvedByScript.isEmpty ? "all placeholders resolved" : "some unresolved — see warnings"))")
                 }
+                if !dirResult.unresolvedByScript.isEmpty {
+                    for (scriptName, keys) in dirResult.unresolvedByScript.sorted(by: { $0.key < $1.key }) {
+                        let names = keys.sorted().joined(separator: ", ")
+                        printStderr("WARNING: unresolved placeholder(s) in \(scriptName): \(names)\n")
+                    }
+                    if buildOptions.strictEnv {
+                        throw MunkiPkgError.buildFailed("--strict-env: one or more script placeholders had no matching environment variable")
+                    }
+                }
+                pkgbuildArgs.append(contentsOf: ["--scripts", dirResult.scriptsDir])
             } else {
-                // No env vars, use original scripts
                 pkgbuildArgs.append(contentsOf: ["--scripts", scriptsPath])
             }
         }
