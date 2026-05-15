@@ -68,8 +68,16 @@ struct BuildOptions: ParsableArguments {
     var skipImport = false
     
     @Option(name: .long,
-            help: ArgumentHelp("Path to .env file containing environment variables to inject into scripts. If not specified, auto-detects .env in project directory.", valueName: "path"))
+            help: ArgumentHelp("Path to .env file containing build-time variables to substitute into scripts. If not specified, auto-detects .env in project directory. Values are embedded as plain text in the built .pkg — do NOT use this for secrets.", valueName: "path"))
     var env: String?
+
+    @Flag(name: .customLong("strict-env"),
+          help: "Fail the build if a script contains a placeholder that has no matching environment variable. Default behavior is to warn and leave the placeholder unsubstituted.")
+    var strictEnv = false
+
+    @Flag(name: .customLong("no-system-env"),
+          help: "Do not merge MUNKIPKG_* prefixed variables from the calling process environment. By default these are merged in alongside the .env file.")
+    var noSystemEnv = false
 }
 
 struct CreateAndImportOptions: ParsableArguments {

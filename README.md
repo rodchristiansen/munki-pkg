@@ -283,81 +283,85 @@ If there is no payload folder at all, `pkgbuild` is called with the `--nopayload
 
 If the payload folder exists, but is empty, you'll get a "pseudo-payload-free" package. No files will be installed, but a receipt will be left. This is often the more useful option if you need to track if the package has been installed on machines you manage.
 
-### Environment Variables and Secret Injection
+### Build-time variable substitution
 
-munkipkg supports injecting secrets and configuration values into pre/postinstall scripts via `.env` files. This is useful for:
+munkipkg supports substituting build-time variables into pre/postinstall scripts via `.env` files. Useful for values that vary by environment but don't change at install time — server URLs, organization identifiers, build metadata.
 
-- API keys and authentication tokens
-- Webhook URLs
-- Service account credentials
-- Environment-specific configuration
+> **Do not put secrets here.** A `.pkg` is an XAR archive; anyone with the built package can read its scripts with `pkgutil --expand`. Whatever you substitute in is plain text in the artifact. For actual runtime secrets, fetch them inside the script — from the system Keychain, a config profile delivered by MDM, or a secrets endpoint.
+
+The variable name implies a category of use ("API_KEY", "TOKEN", "PASSWORD") but the mechanism is dumb string substitution at build time — it has no relationship to runtime secret management.
 
 #### Using .env files
 
 Create a `.env` file in your package project directory:
 
+    project_dir/
+        .env
+        .env.example
+        build-info.plist
+        payload/
+        scripts/
+
+The `.env` file uses a simple `KEY=VALUE` format. Comments start with `#`. Surrounding single or double quotes are stripped. Keys must match identifier syntax (`[A-Za-z_][A-Za-z0-9_]*`).
+
 ```
-project_dir/
-    .env              # Environment variables (DO NOT commit to git!)
-    .env.example      # Template for team members
-    build-info.plist
-    payload/
-    scripts/
-```
-
-The `.env` file uses a simple `KEY=VALUE` format:
-
-```bash
-# API credentials (comments are supported)
-API_KEY=your-secret-api-key-here
-WEBHOOK_URL=https://your-server.com/webhook
-
-# Quoted values are supported
-SERVICE_ACCOUNT="admin@example.com"
+SERVER_URL=https://munki.example.com
+ORG_NAME="Example Corp"
+BUILD_CHANNEL=production
 ```
 
 #### Placeholder patterns in scripts
 
-munkipkg supports multiple placeholder patterns in your scripts. Use whichever style fits your needs:
+Four placeholder patterns are supported. Pick whichever fits the surrounding syntax of the script.
 
-| Pattern | Example | Description |
-|---------|---------|-------------|
-| Shell style | `${API_KEY}` | Standard shell variable syntax |
-| Mustache style | `{{API_KEY}}` | Template-style placeholders |
-| Legacy style | `API_KEY_PLACEHOLDER` | Explicit placeholder suffix |
-| XML-safe style | `__API_KEY__` | Safe for use in plist/XML files |
+| Pattern | Example | Notes |
+|---|---|---|
+| Shell-style | `${SERVER_URL}` | Common; collides with shell parameter expansion if you'd rather have the shell expand it at install time |
+| Mustache-style | `{{SERVER_URL}}` | Template-style, won't be expanded by a shell |
+| XML-safe | `__SERVER_URL__` | Safe inside `<string>` elements of a plist |
+| Legacy | `SERVER_URL_PLACEHOLDER` | Word-boundary anchored — `XSERVER_URL_PLACEHOLDER` is NOT matched |
+
+Substitution is performed in a single scan — values that themselves contain placeholder syntax are not re-expanded against other keys.
 
 Example postinstall script:
 
-```bash
+```
 #!/bin/bash
-
-# Configure the application with injected secrets
-defaults write /Library/Preferences/com.example.myapp APIKey -string "${API_KEY}"
-defaults write /Library/Preferences/com.example.myapp WebhookURL -string "{{WEBHOOK_URL}}"
-
-# Call an API endpoint
-curl -X POST "{{WEBHOOK_URL}}" \
-     -H "Authorization: Bearer ${API_KEY}" \
-     -d '{"status": "installed"}'
-
+defaults write /Library/Preferences/com.example.myapp ServerURL -string "${SERVER_URL}"
+defaults write /Library/Preferences/com.example.myapp OrgName -string "{{ORG_NAME}}"
 exit 0
 ```
 
+#### Sources of variables, in precedence order
+
+1. The `.env` file (highest priority)
+2. `MUNKIPKG_*` prefixed variables from the calling process environment
+
+The system-env merge can be disabled with `--no-system-env`. The unprefixed system environment is never picked up.
+
 #### Specifying a custom .env file
 
-By default, munkipkg looks for a `.env` file in the project directory. You can specify a different path:
+By default, munkipkg looks for a `.env` file inside the project directory. To use a different path:
 
-```bash
-munkipkg --env /path/to/production.env my-package-project
-```
+    munkipkg --env /path/to/config.env my-package-project
 
-#### Security considerations
+If the path you pass with `--env` doesn't exist, the build fails. If the project's auto-detected `.env` doesn't exist, the build proceeds with no substitution (this is the common case for projects without any `.env` at all).
 
-- **Never commit `.env` files to version control!** The default `.gitignore` excludes `.env` automatically.
-- Create a `.env.example` template with placeholder values for team members.
-- Use separate `.env` files for different environments (development, staging, production).
-- Consider using a secrets manager and generating `.env` files dynamically in CI/CD pipelines.
+#### Strict mode
+
+By default, if a script contains a placeholder that has no matching variable, munkipkg warns and leaves the placeholder unsubstituted in the built package. To make this a build failure instead:
+
+    munkipkg --strict-env my-package-project
+
+Recommended for CI builds.
+
+#### Operational notes
+
+- The default `.gitignore` created by `--create` and `--import` excludes `.env`. Existing projects need the entry added manually.
+- munkipkg warns at build time if your `.env` is tracked by git or not gitignored.
+- munkipkg warns if your `.env` is group- or world-readable. `chmod 600 .env` is recommended.
+- Processed scripts are written to `build/tmp/scripts/` with mode 0700 and deleted at the end of the build.
+- Files larger than 1 MB are rejected as a sanity check.
 
 ### Package signing
 
