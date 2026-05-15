@@ -89,16 +89,38 @@ struct EnvLoaderTests {
     // MARK: - merge
 
     @Test func mergePrefersFileOverSystem() {
-        let merged = EnvLoader.merge(envFileVars: ["MUNKIPKG_FOO": "from-file"], includeSysEnv: true)
-        // Whatever system has, file value wins.
-        #expect(merged.vars["MUNKIPKG_FOO"] == "from-file")
+        // Set a system env var via libc setenv so merge() actually has a system-side
+        // value to be overridden by the file value. Use a unique key per run so
+        // parallel tests don't collide.
+        let key = "MUNKIPKG_PRECEDENCE_\(UUID().uuidString.replacingOccurrences(of: "-", with: "_"))"
+        key.withCString { keyPtr in
+            "from-system".withCString { valPtr in
+                _ = setenv(keyPtr, valPtr, 1)
+            }
+        }
+        defer {
+            key.withCString { _ = unsetenv($0) }
+        }
+
+        let merged = EnvLoader.merge(envFileVars: [key: "from-file"], includeSysEnv: true)
+        #expect(merged.vars[key] == "from-file")
+        #expect(merged.systemEnvKeys.contains(key))
     }
 
     @Test func mergeSkipsSystemWhenDisabled() {
-        // Set a sentinel system env var via ProcessInfo isn't trivial in-process; the
-        // important behavior is that we don't pick up anything when disabled.
+        let key = "MUNKIPKG_DISABLED_\(UUID().uuidString.replacingOccurrences(of: "-", with: "_"))"
+        key.withCString { keyPtr in
+            "from-system".withCString { valPtr in
+                _ = setenv(keyPtr, valPtr, 1)
+            }
+        }
+        defer {
+            key.withCString { _ = unsetenv($0) }
+        }
+
         let merged = EnvLoader.merge(envFileVars: ["LOCAL_KEY": "value"], includeSysEnv: false)
-        #expect(merged.systemEnvKeys.isEmpty)
+        #expect(!merged.systemEnvKeys.contains(key))
+        #expect(merged.vars[key] == nil)
         #expect(merged.vars["LOCAL_KEY"] == "value")
     }
 
@@ -147,18 +169,39 @@ struct EnvLoaderTests {
         #expect(result.content.contains("c=FOO_PLACEHOLDERX"))
     }
 
-    @Test func emptyValuesLeavePlaceholderAsUnresolved() {
-        let result = PlaceholderReplacer.replace(in: "x=${EMPTY}", with: ["EMPTY": ""])
-        #expect(result.content == "x=${EMPTY}")
-        #expect(result.unresolved.contains("EMPTY"))
+    @Test func emptyValuesSubstituteAsEmptyString() {
+        // An intentional empty value (KEY=) should substitute to "" and NOT be
+        // reported as unresolved. Missing keys (no entry at all) remain unresolved.
+        let result = PlaceholderReplacer.replace(
+            in: "x=${EMPTY}|y=${MISSING}",
+            with: ["EMPTY": ""]
+        )
+        #expect(result.content == "x=|y=${MISSING}")
+        #expect(result.unresolved == ["MISSING"])
     }
 
-    @Test func valuesWithShellMetacharactersAreSpliedVerbatim() {
+    @Test func valuesWithShellMetacharactersAreSplicedVerbatim() {
         // Documenting current behavior: values are NOT escaped. Callers must not put
         // untrusted data in .env. This test exists so that future changes that DO
         // introduce escaping break it visibly and force a conscious choice.
         let result = PlaceholderReplacer.replace(in: "echo ${VAL}", with: ["VAL": "$(whoami)"])
         #expect(result.content == "echo $(whoami)")
+    }
+
+    @Test func scanScriptsDirectoryReportsPlaceholdersWithoutSubstituting() throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+        let scripts = (dir as NSString).appendingPathComponent("scripts")
+        try FileManager.default.createDirectory(atPath: scripts, withIntermediateDirectories: true)
+        let postinstall = (scripts as NSString).appendingPathComponent("postinstall")
+        try "#!/bin/bash\necho ${MISSING_A} ${MISSING_B}\n".write(toFile: postinstall, atomically: true, encoding: .utf8)
+
+        let result = PlaceholderReplacer.scanScriptsDirectory(at: scripts)
+        #expect(result["postinstall"] == ["MISSING_A", "MISSING_B"])
+
+        // Source script content unchanged.
+        let after = try String(contentsOfFile: postinstall, encoding: .utf8)
+        #expect(after.contains("${MISSING_A}"))
     }
 
     // MARK: - helpers

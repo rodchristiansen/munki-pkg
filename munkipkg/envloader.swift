@@ -204,7 +204,10 @@ public struct PlaceholderReplacer: Sendable {
             }
 
             let placeholder = ns.substring(with: r)
-            if let key, let value = envVars[key], !value.isEmpty {
+            // A key that's present in envVars is considered resolved, even if its
+            // value is the empty string (an intentional `KEY=` line). Only a missing
+            // key counts as unresolved.
+            if let key, let value = envVars[key] {
                 output.append(value)
             } else {
                 output.append(placeholder)
@@ -219,6 +222,37 @@ public struct PlaceholderReplacer: Sendable {
         }
 
         return Result(content: output as String, unresolved: unresolved)
+    }
+
+    /// Scan a scripts directory for placeholder references without performing any
+    /// substitution. Used by `--strict-env` when no variables are available, so
+    /// scripts with `${MISSING}` still fail the build.
+    public static func scanScriptsDirectory(at scriptsDir: String) -> [String: Set<String>] {
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: scriptsDir),
+              let contents = try? fileManager.contentsOfDirectory(atPath: scriptsDir) else {
+            return [:]
+        }
+
+        let scriptNames: Set<String> = ["preinstall", "postinstall", "preupgrade", "postupgrade", "preexpansion"]
+        let scriptsToScan = contents.filter { name in
+            scriptNames.contains(name) || name.hasSuffix(".sh") || name.hasSuffix(".py")
+        }
+
+        var unresolvedByScript: [String: Set<String>] = [:]
+        let scriptsURL = URL(fileURLWithPath: scriptsDir)
+        for scriptName in scriptsToScan {
+            let path = scriptsURL.appendingPathComponent(scriptName).path
+            guard let data = fileManager.contents(atPath: path),
+                  let content = String(data: data, encoding: .utf8) else {
+                continue
+            }
+            let result = replace(in: content, with: [:])
+            if !result.unresolved.isEmpty {
+                unresolvedByScript[scriptName] = result.unresolved
+            }
+        }
+        return unresolvedByScript
     }
 
     /// Process scripts in a directory, replacing placeholders. Processed scripts are
@@ -274,11 +308,14 @@ public struct PlaceholderReplacer: Sendable {
                 unresolvedByScript[scriptName] = result.unresolved
             }
 
-            // Preserve execute bits but strip group/other r/w/x — these scripts contain
-            // substituted values and shouldn't be readable by other local users during build.
+            // Strip group/other r/w/x — these scripts contain substituted values and
+            // shouldn't be readable by other local users during build. Always force the
+            // owner execute bit since pkgbuild requires scripts to be executable, and a
+            // source file with mode 0644 would otherwise produce a non-runnable 0600
+            // destination.
             let sourceAttrs = try fileManager.attributesOfItem(atPath: sourcePath)
             let sourcePerms = (sourceAttrs[.posixPermissions] as? Int) ?? 0o700
-            let safePerms = (sourcePerms & 0o700) == 0 ? 0o700 : (sourcePerms & 0o700)
+            let safePerms = (sourcePerms & 0o700) | 0o100
             try fileManager.setAttributes([.posixPermissions: safePerms], ofItemAtPath: destPath)
         }
 
