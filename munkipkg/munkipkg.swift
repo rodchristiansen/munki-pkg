@@ -27,6 +27,20 @@ private func printStderr(_ message: String) {
     FileHandle.standardError.write(Data(message.utf8))
 }
 
+// CFPreferences domain for munkipkg admin preferences.
+private let MUNKIPKG_PREFS_DOMAIN = "com.github.munki.munkipkg"
+
+/// Read a munkipkg admin preference.
+///
+/// Looks `key` up via `CFPreferencesCopyAppValue`, which searches the standard
+/// preference path: a managed/forced configuration profile first, then the
+/// user's preferences. This lets an MDM profile or
+/// `defaults write com.github.munki.munkipkg <key> <value>` configure munkipkg
+/// behavior. Returns nil when the key is not set in any domain.
+private func adminPref(_ key: String) -> Any? {
+    CFPreferencesCopyAppValue(key as CFString, MUNKIPKG_PREFS_DOMAIN as CFString)
+}
+
 @main
 struct MunkiPkg: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -599,9 +613,17 @@ struct MunkiPkg: AsyncParsableCommand {
         
         print("Package built successfully: \(outputPath)")
         
+        // Skip import prompt if --no-import flag is set
+        if buildOptions.noImport {
+            return
+        }
+        
+        // Check admin preference for default behavior
+        let importAfterBuild = adminPref("import_after_build") as? Bool ?? false
+        
         // Prompt to import into repo using munkiimport
         if !buildOptions.skipImport,
-           try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: false) {
+           try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: importAfterBuild) {
             try await runMunkiimport(packagePath: outputPath)
         }
     }
