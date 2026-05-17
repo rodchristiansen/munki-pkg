@@ -89,6 +89,9 @@ struct MunkiPkg: AsyncParsableCommand {
             if buildOptions.skipImport {
                 throw ValidationError("--skip-import only valid with --build")
             }
+            if buildOptions.noImport {
+                throw ValidationError("--no-import only valid with --build")
+            }
         }
 
         // action is not create or import
@@ -618,13 +621,13 @@ struct MunkiPkg: AsyncParsableCommand {
             return
         }
         
-        // Check admin preference for default behavior
-        let importAfterBuild = adminPref("import_after_build") as? Bool ?? false
-        
-        // Prompt to import into repo using munkiimport
-        if !buildOptions.skipImport,
-           try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: importAfterBuild) {
-            try await runMunkiimport(packagePath: outputPath)
+        // Prompt to import into repo using munkiimport. The admin
+        // preference only matters when the prompt is actually shown.
+        if !buildOptions.skipImport {
+            let importAfterBuild = adminPref("import_after_build") as? Bool ?? false
+            if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: importAfterBuild) {
+                try await runMunkiimport(packagePath: outputPath)
+            }
         }
     }
     
