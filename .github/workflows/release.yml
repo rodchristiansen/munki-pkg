@@ -1,0 +1,42 @@
+# Builds munkipkg and publishes it as a GitHub release asset whenever a
+# v* tag is pushed. MunkiStudio's "Download & Install munkipkg" fetches
+# the release asset named "munkipkg".
+#
+# For signed/notarized distribution, add a Developer ID identity and use
+# the Makefile's `sign` target with repo secrets.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build release binary
+        run: make release
+
+      - name: Stage binary
+        run: |
+          mkdir -p dist
+          cp .build/release/munkipkg dist/munkipkg
+          codesign --force --sign - dist/munkipkg
+          chmod 755 dist/munkipkg
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/munkipkg \
+            --title "$TAG" \
+            --generate-notes
