@@ -86,9 +86,6 @@ struct MunkiPkg: AsyncParsableCommand {
             if buildOptions.skipStapling {
                 throw ValidationError("--skip-stapling only valid with --build")
             }
-            if buildOptions.skipImport {
-                throw ValidationError("--skip-import only valid with --build")
-            }
             if buildOptions.noImport {
                 throw ValidationError("--no-import only valid with --build")
             }
@@ -616,18 +613,15 @@ struct MunkiPkg: AsyncParsableCommand {
         
         print("Package built successfully: \(outputPath)")
         
-        // Skip import prompt if --no-import flag is set
+        // Skip the import prompt entirely if --no-import was passed.
         if buildOptions.noImport {
             return
         }
-        
-        // Prompt to import into repo using munkiimport. The admin
-        // preference only matters when the prompt is actually shown.
-        if !buildOptions.skipImport {
-            let importAfterBuild = adminPref("import_after_build") as? Bool ?? false
-            if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: importAfterBuild) {
-                try await runMunkiimport(packagePath: outputPath)
-            }
+
+        // Prompt to import into repo using munkiimport.
+        let importAfterBuild = adminPref("import_after_build") as? Bool ?? false
+        if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: importAfterBuild) {
+            try await runMunkiimport(packagePath: outputPath)
         }
     }
     
