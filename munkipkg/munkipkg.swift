@@ -27,6 +27,20 @@ private func printStderr(_ message: String) {
     FileHandle.standardError.write(Data(message.utf8))
 }
 
+// CFPreferences domain for munkipkg admin preferences.
+private let MUNKIPKG_PREFS_DOMAIN = "com.github.munki.munkipkg"
+
+/// Read a munkipkg admin preference.
+///
+/// Looks `key` up via `CFPreferencesCopyAppValue`, which searches the standard
+/// preference path: a managed/forced configuration profile first, then the
+/// user's preferences. This lets an MDM profile or
+/// `defaults write com.github.munki.munkipkg <key> <value>` configure munkipkg
+/// behavior. Returns nil when the key is not set in any domain.
+private func adminPref(_ key: String) -> Any? {
+    CFPreferencesCopyAppValue(key as CFString, MUNKIPKG_PREFS_DOMAIN as CFString)
+}
+
 @main
 struct MunkiPkg: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -72,8 +86,8 @@ struct MunkiPkg: AsyncParsableCommand {
             if buildOptions.skipStapling {
                 throw ValidationError("--skip-stapling only valid with --build")
             }
-            if buildOptions.skipImport {
-                throw ValidationError("--skip-import only valid with --build")
+            if buildOptions.noImport {
+                throw ValidationError("--no-import only valid with --build")
             }
         }
 
@@ -599,9 +613,14 @@ struct MunkiPkg: AsyncParsableCommand {
         
         print("Package built successfully: \(outputPath)")
         
-        // Prompt to import into repo using munkiimport
-        if !buildOptions.skipImport,
-           try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: false) {
+        // Skip the import prompt entirely if --no-import was passed.
+        if buildOptions.noImport {
+            return
+        }
+
+        // Prompt to import into repo using munkiimport.
+        let importAfterBuild = adminPref("import_after_build") as? Bool ?? false
+        if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: importAfterBuild) {
             try await runMunkiimport(packagePath: outputPath)
         }
     }

@@ -63,9 +63,9 @@ struct BuildOptions: ParsableArguments {
           help: "Skips the stapling part of notarization process when notarization is specified in build-info")
     var skipStapling = false
 
-    @Flag(name: .customLong("skip-import"),
-          help: "Skips the post-build prompt to import the package into a Munki repo with munkiimport. Useful for CI/CD pipelines.")
-    var skipImport = false
+    @Flag(name: .long,
+          help: "Skips the post-build prompt to import the package into a Munki repo with munkiimport. Useful for automation and CI/CD pipelines.")
+    var noImport = false
     
     @Option(name: .long,
             help: ArgumentHelp("Path to .env file containing build-time variables to substitute into scripts. If not specified, auto-detects .env in project directory. Values are embedded as plain text in the built .pkg — do NOT use this for secrets.", valueName: "path"))
