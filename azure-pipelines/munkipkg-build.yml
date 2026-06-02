@@ -1,0 +1,100 @@
+# Azure DevOps steps template that builds an Apple installer package from a
+# munkipkg project directory — the ADO equivalent of this repo's GitHub
+# composite action (action.yml). It downloads the munkipkg release binary,
+# optionally lints, builds with --output-format json, and exposes the result
+# as output variables on the 'build' step.
+#
+# Usage from a pipeline in another repo. Reference munki-pkg as a repository
+# resource, then include this template:
+#
+#   resources:
+#     repositories:
+#       - repository: munkipkg
+#         type: github
+#         name: rodchristiansen/munki-pkg
+#         endpoint: <your GitHub service connection>
+#
+#   steps:
+#     - template: azure-pipelines/munkipkg-build.yml@munkipkg
+#       parameters:
+#         projectPath: packages/my-package-project
+#         version: $(Build.SourceBranchName)
+#         lint: true
+#
+# Outputs (from the step named 'build'):
+#   $(build.pkgPath)  $(build.version)  $(build.sha256)
+#
+# Must run on a macOS agent (pool: { vmImage: 'macOS-latest' }).
+
+parameters:
+  - name: projectPath
+    type: string
+  - name: version
+    type: string
+    default: ''
+  - name: outputDir
+    type: string
+    default: 'dist'
+  - name: munkipkgVersion
+    type: string
+    default: 'latest'
+  - name: lint
+    type: boolean
+    default: false
+  - name: verify
+    type: boolean
+    default: false
+  - name: extraArgs
+    type: string
+    default: ''
+
+steps:
+  - bash: |
+      set -euo pipefail
+      repo="rodchristiansen/munki-pkg"
+      if [ "$MUNKIPKG_VERSION" = "latest" ]; then
+        url="https://github.com/$repo/releases/latest/download/munkipkg"
+      else
+        url="https://github.com/$repo/releases/download/$MUNKIPKG_VERSION/munkipkg"
+      fi
+      dest="$AGENT_TEMPDIRECTORY/munkipkg"
+      curl -fsSL -o "$dest" "$url"
+      chmod +x "$dest"
+      echo "##vso[task.prependpath]$AGENT_TEMPDIRECTORY"
+      "$dest" --version
+    displayName: 'Download munkipkg'
+    env:
+      MUNKIPKG_VERSION: ${{ parameters.munkipkgVersion }}
+
+  - ${{ if eq(parameters.lint, true) }}:
+      - bash: munkipkg --lint "$PROJECT_PATH"
+        displayName: 'Lint package project'
+        env:
+          PROJECT_PATH: ${{ parameters.projectPath }}
+
+  - bash: |
+      set -euo pipefail
+      args=(--build --no-import --output-format json --output-dir "$OUTPUT_DIR")
+      if [ -n "$PKG_VERSION" ]; then
+        args+=(--pkg-version "$PKG_VERSION")
+      fi
+      if [ "$DO_VERIFY" = "True" ]; then
+        args+=(--verify)
+      fi
+      if [ -n "$EXTRA_ARGS" ]; then
+        read -ra extra <<< "$EXTRA_ARGS"
+        args+=("${extra[@]}")
+      fi
+      result="$(munkipkg "${args[@]}" "$PROJECT_PATH")"
+      echo "$result"
+      echo "##vso[task.setvariable variable=pkgPath;isOutput=true]$(echo "$result" | jq -r '.pkg_path')"
+      echo "##vso[task.setvariable variable=version;isOutput=true]$(echo "$result" | jq -r '.version')"
+      echo "##vso[task.setvariable variable=sha256;isOutput=true]$(echo "$result" | jq -r '.sha256')"
+    name: build
+    displayName: 'Build package'
+    env:
+      PROJECT_PATH: ${{ parameters.projectPath }}
+      PKG_VERSION: ${{ parameters.version }}
+      OUTPUT_DIR: ${{ parameters.outputDir }}
+      DO_VERIFY: ${{ parameters.verify }}
+      EXTRA_ARGS: ${{ parameters.extraArgs }}

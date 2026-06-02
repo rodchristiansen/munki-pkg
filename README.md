@@ -665,6 +665,33 @@ This repo ships a composite action so other workflows can build a package projec
 
 Inputs: `project-path` (required), `version`, `output-dir` (default `dist`), `munkipkg-version` (release tag or `latest`), `lint`, `verify`, and `extra-args`. Outputs: `pkg-path`, `version`, `sha256`.
 
+### Azure DevOps
+
+The same build flow is available as an Azure DevOps **steps template** at `azure-pipelines/munkipkg-build.yml`. Reference this repo as a repository resource, then include the template on a macOS agent:
+
+```yaml
+resources:
+  repositories:
+    - repository: munkipkg
+      type: github
+      name: rodchristiansen/munki-pkg
+      endpoint: my-github-connection
+
+pool:
+  vmImage: macOS-latest
+
+steps:
+  - template: azure-pipelines/munkipkg-build.yml@munkipkg
+    parameters:
+      projectPath: packages/my-package-project
+      version: $(Build.SourceBranchName)
+      lint: true
+
+  - bash: echo "Built $(build.pkgPath) ($(build.sha256))"
+```
+
+Parameters mirror the GitHub Action: `projectPath` (required), `version`, `outputDir`, `munkipkgVersion`, `lint`, `verify`, `extraArgs`. The build step is named `build`, so its outputs are available as `$(build.pkgPath)`, `$(build.version)`, and `$(build.sha256)`.
+
 ### Release artifacts and verification
 
 Each release publishes the `munkipkg` binary alongside a `SHA256SUMS` file, so you can verify what you downloaded. This example fetches the most recent release:
