@@ -115,9 +115,20 @@ struct MunkiPkg: AsyncParsableCommand {
             if buildOptions.noImport {
                 throw ValidationError("--no-import only valid with --build")
             }
-            if buildOptions.outputFormat != .text {
-                throw ValidationError("--output-format only valid with --build")
+            if buildOptions.pkgVersion != nil {
+                throw ValidationError("--pkg-version only valid with --build")
             }
+            if buildOptions.outputDir != nil {
+                throw ValidationError("--output-dir only valid with --build")
+            }
+            if buildOptions.verify {
+                throw ValidationError("--verify only valid with --build")
+            }
+        }
+
+        // --output-format produces a result report; it applies to --build and --lint.
+        if buildOptions.outputFormat != .text, !actionOptions.build, !actionOptions.lint {
+            throw ValidationError("--output-format only valid with --build or --lint")
         }
 
         // action is not create or import
@@ -171,6 +182,8 @@ struct MunkiPkg: AsyncParsableCommand {
                 try syncFromBomInfo()
             } else if actionOptions.convert {
                 try convertBuildInfo()
+            } else if actionOptions.lint {
+                try lintProject()
             } else if actionOptions.build {
                 try await buildPackage()
             } else {
@@ -673,8 +686,8 @@ struct MunkiPkg: AsyncParsableCommand {
         
         let projectURL = URL(fileURLWithPath: projectPath)
         
-        // Load build info
-        let buildInfo = try loadBuildInfo(from: projectURL)
+        // Load build info, applying any CLI version override.
+        let buildInfo = try loadBuildInfo(from: projectURL, versionOverride: buildOptions.pkgVersion)
 
         // Load build-time variables from .env (and optionally system env).
         let envVars = try loadEnvironmentVariables(for: projectURL)
@@ -853,22 +866,27 @@ struct MunkiPkg: AsyncParsableCommand {
         )
     }
     
-    private func loadBuildInfo(from projectURL: URL) throws -> BuildInfo {
+    private func loadBuildInfo(from projectURL: URL, versionOverride: String? = nil) throws -> BuildInfo {
         // Try different build-info file formats
         let possiblePaths = [
             projectURL.appendingPathComponent("build-info.plist"),
             projectURL.appendingPathComponent("build-info.json"),
             projectURL.appendingPathComponent("build-info.yaml")
         ]
-        
+
         for path in possiblePaths {
             if FileManager.default.fileExists(atPath: path.path) {
                 var buildInfo = try BuildInfo(fromFile: path.path)
+                // Apply a CLI version override before substitution so a ${version}
+                // placeholder in the package name resolves to the overridden value.
+                if let versionOverride {
+                    buildInfo.version = versionOverride
+                }
                 buildInfo.doSubstitutions()
                 return buildInfo
             }
         }
-        
+
         throw MunkiPkgError.invalidProject("No build-info file found")
     }
     
@@ -1163,6 +1181,24 @@ struct MunkiPkg: AsyncParsableCommand {
             }
         }
 
+        // Move the finished package to a caller-specified output directory.
+        if let outputDir = buildOptions.outputDir {
+            let outDirURL = URL(fileURLWithPath: outputDir)
+            try FileManager.default.createDirectory(at: outDirURL, withIntermediateDirectories: true)
+            let dest = outDirURL.appendingPathComponent((finalPackagePath as NSString).lastPathComponent)
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.moveItem(atPath: finalPackagePath, toPath: dest.path)
+            finalPackagePath = dest.path
+            status("munkipkg: moved package to \(dest.path)")
+        }
+
+        // Verify the built package matches what build-info declared.
+        if buildOptions.verify {
+            try await verifyPackage(at: finalPackagePath, signed: isSigned, notarized: didNotarize)
+        }
+
         let digest = try sha256(ofFileAt: finalPackagePath)
         return BuildResult(
             // Report the actual artifact filename so `name` always agrees with
@@ -1187,6 +1223,142 @@ struct MunkiPkg: AsyncParsableCommand {
         if result.exitCode == 0 {
             try result.stdout.write(toFile: bomPath, atomically: true, encoding: String.Encoding.utf8)
             status("BOM info exported to: \(bomPath)")
+        }
+    }
+
+    // MARK: - Verify
+
+    /// Assert the built package matches what build-info declared. When signing was
+    /// requested, the package must carry a signature; when notarization succeeded,
+    /// the package must pass Gatekeeper's install assessment. Either mismatch fails
+    /// the build with the matching exit code.
+    private func verifyPackage(at packagePath: String, signed: Bool, notarized: Bool) async throws {
+        if signed {
+            status("munkipkg: verifying package signature")
+            let sig = await runCliAsync("/usr/sbin/pkgutil", arguments: ["--check-signature", packagePath])
+            if sig.exitCode != 0 {
+                printStderr(sig.stdout)
+                printStderr(sig.stderr)
+                throw MunkiPkgError.signingFailed("--verify: package signature check failed (pkgutil exit code \(sig.exitCode))")
+            }
+            diagnostic(sig.stdout)
+        }
+
+        if notarized {
+            status("munkipkg: verifying Gatekeeper assessment")
+            let assess = await runCliAsync("/usr/sbin/spctl", arguments: ["-a", "-vvv", "-t", "install", packagePath])
+            if assess.exitCode != 0 {
+                printStderr(assess.stdout)
+                printStderr(assess.stderr)
+                throw MunkiPkgError.notarizationFailed("--verify: package failed Gatekeeper assessment (spctl exit code \(assess.exitCode))")
+            }
+            diagnostic(assess.stderr)
+        }
+    }
+
+    // MARK: - Lint
+
+    /// Structured result of a `--lint` run, emitted as JSON under `--output-format json`.
+    private struct LintReport: Codable {
+        let ok: Bool
+        let errors: [String]
+        let warnings: [String]
+    }
+
+    /// Validate a package project without building it. Collects fatal errors and
+    /// non-fatal warnings, prints a report, and exits non-zero if any error is found.
+    private func lintProject() throws {
+        let projectURL = URL(fileURLWithPath: actionOptions.projectPath)
+        var errors: [String] = []
+        var warnings: [String] = []
+
+        // build-info must exist and parse. A failure here is fatal on its own.
+        let buildInfo: BuildInfo
+        do {
+            buildInfo = try loadBuildInfo(from: projectURL, versionOverride: buildOptions.pkgVersion)
+        } catch {
+            let message = (error as? MunkiPkgError)?.description ?? error.localizedDescription
+            try emitLintReport(LintReport(ok: false, errors: ["build-info: \(message)"], warnings: []))
+            throw ExitCode(3)
+        }
+
+        // Required fields.
+        if buildInfo.name.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append("build-info: 'name' is empty")
+        }
+        if buildInfo.identifier.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append("build-info: 'identifier' is empty")
+        } else if !buildInfo.identifier.contains(".") {
+            warnings.append("build-info: 'identifier' (\(buildInfo.identifier)) is not in reverse-domain form (e.g. com.example.app)")
+        }
+        if buildInfo.version.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append("build-info: 'version' is empty")
+        }
+
+        // Signing / notarization coherence.
+        if let signing = buildInfo.signingInfo, signing.identity.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append("signing_info: 'identity' is empty")
+        }
+        if let notarization = buildInfo.notarizationInfo {
+            let hasProfile = !(notarization.keychainProfile?.isEmpty ?? true)
+            let hasAppleId = !(notarization.appleId?.isEmpty ?? true)
+                && !(notarization.teamId?.isEmpty ?? true)
+                && !(notarization.password?.isEmpty ?? true)
+            if !hasProfile, !hasAppleId {
+                errors.append("notarization_info: need either 'keychain_profile' or all of 'apple_id', 'team_id', 'password'")
+            }
+            if buildInfo.signingInfo == nil {
+                warnings.append("notarization_info is set but signing_info is not — notarization requires a Developer ID-signed package")
+            }
+        }
+
+        // Scripts must be executable and have a shebang, or pkgbuild won't run them.
+        let scriptsURL = projectURL.appendingPathComponent("scripts")
+        if let scriptNames = try? FileManager.default.contentsOfDirectory(atPath: scriptsURL.path) {
+            for name in scriptNames.sorted() where !name.hasPrefix(".") {
+                let scriptPath = scriptsURL.appendingPathComponent(name).path
+                var isDir: ObjCBool = false
+                FileManager.default.fileExists(atPath: scriptPath, isDirectory: &isDir)
+                if isDir.boolValue { continue }
+                if !FileManager.default.isExecutableFile(atPath: scriptPath) {
+                    warnings.append("scripts/\(name): not executable (chmod +x) — pkgbuild will not run it")
+                }
+                if let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: scriptPath)) {
+                    let head = (try? handle.read(upToCount: 2)) ?? Data()
+                    try? handle.close()
+                    if head != Data("#!".utf8) {
+                        warnings.append("scripts/\(name): missing a #! shebang line")
+                    }
+                }
+            }
+        }
+
+        let report = LintReport(ok: errors.isEmpty, errors: errors, warnings: warnings)
+        try emitLintReport(report)
+        if !errors.isEmpty {
+            throw ExitCode(3)
+        }
+    }
+
+    /// Print a lint report in the requested format. In text mode, findings go to
+    /// stderr and the pass/fail line to stdout, mirroring the build output contract.
+    private func emitLintReport(_ report: LintReport) throws {
+        switch buildOptions.outputFormat {
+        case .json:
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            let data = try encoder.encode(report)
+            if let string = String(data: data, encoding: .utf8) {
+                print(string)
+            }
+        case .text:
+            for error in report.errors {
+                printStderr("ERROR: \(error)\n")
+            }
+            for warning in report.warnings {
+                printStderr("WARNING: \(warning)\n")
+            }
+            print(report.ok ? "lint: OK (\(report.warnings.count) warning(s))" : "lint: FAILED (\(report.errors.count) error(s), \(report.warnings.count) warning(s))")
         }
     }
     

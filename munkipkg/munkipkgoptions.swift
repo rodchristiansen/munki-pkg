@@ -36,6 +36,10 @@ struct ActionOptions: ParsableArguments {
           help: "Convert build-info file(s) to a different format. Use with --to-yaml, --to-plist, or --to-json.")
     var convert = false
 
+    @Flag(name: .long,
+          help: "Validate the package project (build-info, scripts, signing/notarization coherence) without building. Exits non-zero if any error is found. Useful as a fast pre-build check in PR CI.")
+    var lint = false
+
     @Argument(help: "Path to package project directory.")
     var projectPath: String = ""
 
@@ -46,13 +50,14 @@ struct ActionOptions: ParsableArguments {
         if importPath != nil { actionCount += 1 }
         if sync { actionCount += 1 }
         if convert { actionCount += 1 }
+        if lint { actionCount += 1 }
         if actionCount == 0 {
             // default to build
             build = true
             actionCount = 1
         }
         if actionCount != 1 {
-            throw ValidationError("One (and only one) of --build, --create, --import, --sync, or --convert must be specified.")
+            throw ValidationError("One (and only one) of --build, --create, --import, --sync, --convert, or --lint must be specified.")
         }
     }
 }
@@ -89,6 +94,18 @@ struct BuildOptions: ParsableArguments {
     @Option(name: .customLong("output-format"),
             help: "Format for the build result printed to stdout: 'text' (default, human-readable summary) or 'json' (machine-readable build manifest for CI). All progress and diagnostics go to stderr. Implies --no-import.")
     var outputFormat: OutputFormat = .text
+
+    @Option(name: .customLong("pkg-version"),
+            help: ArgumentHelp("Override the version from build-info. Lets the version come from a git tag or CI variable instead of being committed to the project. Resolved before ${version} substitution in the package name.", valueName: "version"))
+    var pkgVersion: String?
+
+    @Option(name: .customLong("output-dir"),
+            help: ArgumentHelp("Write the built package to this directory instead of the project's build/ directory. Created if it does not exist.", valueName: "path"))
+    var outputDir: String?
+
+    @Flag(name: .long,
+          help: "After building, verify the package: assert a signature is present when signing was requested (pkgutil --check-signature) and that it passes Gatekeeper assessment when notarized (spctl). Fails the build on mismatch.")
+    var verify = false
 }
 
 struct CreateAndImportOptions: ParsableArguments {
