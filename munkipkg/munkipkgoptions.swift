@@ -106,6 +106,10 @@ struct BuildOptions: ParsableArguments {
     @Flag(name: .long,
           help: "After building, verify the package: assert a signature is present when signing was requested (pkgutil --check-signature) and that it passes Gatekeeper assessment when notarized (spctl). Fails the build on mismatch.")
     var verify = false
+
+    @Flag(name: .long,
+          help: "Write a <package>.provenance.json sidecar recording the tool version, build time, source git commit, an input digest, and the package hash. Useful for supply-chain attestation in CI.")
+    var provenance = false
 }
 
 struct CreateAndImportOptions: ParsableArguments {
