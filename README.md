@@ -574,10 +574,63 @@ Use this option to skip only the stapling part of the notarization process when 
 This option causes munkipkg to read the Bom.txt file, and use its information to create any missing empty directories and to set the permissions on files and directories. See [**Important git notes**](#important-git-notes) below.
 
 `--quiet`  
-Causes munkipkg to suppress normal output messages. Errors will still be printed to stderr.
+Causes munkipkg to suppress progress and status messages. Errors and warnings are still printed to stderr.
+
+`--no-import`  
+Skips the post-build prompt to import the package into a Munki repo with `munkiimport`. Use this in automation and CI/CD pipelines where no interactive terminal is available.
+
+`--output-format`  
+Selects the format of the build result printed to **stdout**: `text` (default, a human-readable summary line) or `json` (a machine-readable build manifest). Only valid with `--build`. Implies `--no-import`. See [**Continuous integration**](#continuous-integration) below.
 
 `--help`, `--version`  
 Prints help message and tool version, respectively.
+
+## Continuous integration
+
+munkipkg is designed to drop cleanly into a CI/CD pipeline.
+
+### Output streams
+
+All progress, status, and diagnostic output goes to **stderr**. **stdout** carries only the build result. This means you can capture a parseable result while still streaming progress to your CI logs:
+
+```bash
+munkipkg --build --output-format json my-package-project > result.json
+```
+
+With `--output-format json`, stdout is a single JSON object describing the build:
+
+```json
+{
+  "name": "MunkiKickstart-1.0.pkg",
+  "version": "1.0",
+  "identifier": "com.example.munki_kickstart",
+  "pkg_path": "/path/to/project/build/MunkiKickstart-1.0.pkg",
+  "sha256": "639ba75c7b6097e0ce7223ec698fd524d9b15b87ccea32dd99fe99b89ec8006a",
+  "signed": true,
+  "notarized": true,
+  "stapled": true
+}
+```
+
+The `signed`, `notarized`, and `stapled` booleans report what actually happened during the build, not merely what build-info requested. The `sha256` is the hash of the final package, suitable for artifact attestation.
+
+### Build failures are hard failures
+
+When build-info declares signing or notarization, a failure in that step fails the build with a non-zero exit code rather than producing a silently-broken package. A package that declares notarization but did not notarize (or did not staple) will never exit 0. To intentionally build without these steps, pass `--skip-notarization` and/or `--skip-stapling`.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | General error |
+| 2 | Project directory already exists (use `--force`) |
+| 3 | Invalid project / no build-info found |
+| 4 | Import failed |
+| 5 | Build failed (`pkgbuild`/`productbuild`) |
+| 6 | Signing failed |
+| 7 | Notarization or stapling failed |
+| 64 | Invalid command-line usage |
 
 ## Important git notes
 

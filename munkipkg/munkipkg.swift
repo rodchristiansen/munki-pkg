@@ -6,6 +6,7 @@
 //
 
 import ArgumentParser
+import CryptoKit
 import Foundation
 
 // Default .gitignore content for new projects
@@ -25,6 +26,31 @@ build/
 // Helper for printing to stderr
 private func printStderr(_ message: String) {
     FileHandle.standardError.write(Data(message.utf8))
+}
+
+/// Machine-readable summary of a completed build. Emitted on stdout as JSON when
+/// `--output-format json` is requested so CI steps can consume the result without
+/// scraping human-readable status text.
+struct BuildResult: Codable, Sendable {
+    let name: String
+    let version: String
+    let identifier: String
+    let pkgPath: String
+    let sha256: String
+    let signed: Bool
+    let notarized: Bool
+    let stapled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case version
+        case identifier
+        case pkgPath = "pkg_path"
+        case sha256
+        case signed
+        case notarized
+        case stapled
+    }
 }
 
 // CFPreferences domain for munkipkg admin preferences.
@@ -88,6 +114,9 @@ struct MunkiPkg: AsyncParsableCommand {
             }
             if buildOptions.noImport {
                 throw ValidationError("--no-import only valid with --build")
+            }
+            if buildOptions.outputFormat != .text {
+                throw ValidationError("--output-format only valid with --build")
             }
         }
 
@@ -362,6 +391,50 @@ struct MunkiPkg: AsyncParsableCommand {
         let gitignorePath = projectURL.appendingPathComponent(".gitignore")
         try GITIGNORE_DEFAULT.write(to: gitignorePath, atomically: true, encoding: .utf8)
     }
+
+    /// Emit a build progress/status line to stderr, honoring `--quiet`. stdout is
+    /// reserved for the build result (the human summary or `--output-format json`
+    /// manifest) so it stays parseable in a pipeline.
+    private func status(_ message: String) {
+        if !additionalOptions.quiet {
+            printStderr(message + "\n")
+        }
+    }
+
+    /// Emit raw subprocess output (pkgbuild/productbuild/notarytool) to stderr as a
+    /// diagnostic, honoring `--quiet`. No trailing newline is added.
+    private func diagnostic(_ text: String) {
+        if !additionalOptions.quiet, !text.isEmpty {
+            printStderr(text)
+        }
+    }
+
+    /// Streaming SHA-256 of a file, returned as a lowercase hex string. Reads in
+    /// chunks so a large .pkg isn't loaded into memory all at once.
+    private func sha256(ofFileAt path: String) throws -> String {
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Print the build result to stdout in the requested format.
+    private func emitBuildResult(_ result: BuildResult) throws {
+        switch buildOptions.outputFormat {
+        case .json:
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            let data = try encoder.encode(result)
+            if let string = String(data: data, encoding: .utf8) {
+                print(string)
+            }
+        case .text:
+            print("Package built successfully: \(result.pkgPath)")
+        }
+    }
     
     private func analyzePermissionsInBom(bomPath: URL, buildInfo: BuildInfo) -> (hasNonRecommendedOwnership: Bool, warnings: [String]) {
         var hasNonRootOwnership = false
@@ -605,23 +678,25 @@ struct MunkiPkg: AsyncParsableCommand {
         let envVars = try loadEnvironmentVariables(for: projectURL)
 
         // Build the package
-        let outputPath = try await performBuild(projectURL: projectURL, buildInfo: buildInfo, envVars: envVars)
-        
+        let result = try await performBuild(projectURL: projectURL, buildInfo: buildInfo, envVars: envVars)
+
         if buildOptions.exportBomInfo {
             try await exportBom(for: projectURL, buildInfo: buildInfo)
         }
-        
-        print("Package built successfully: \(outputPath)")
-        
-        // Skip the import prompt entirely if --no-import was passed.
-        if buildOptions.noImport {
+
+        try emitBuildResult(result)
+
+        // Skip the import prompt entirely if --no-import was passed, or whenever a
+        // machine-readable result was requested — JSON output implies an automated
+        // pipeline, and an interactive prompt would both stall it and pollute stdout.
+        if buildOptions.noImport || buildOptions.outputFormat != .text {
             return
         }
 
         // Prompt to import into repo using munkiimport.
         let importAfterBuild = adminPref("import_after_build") as? Bool ?? false
         if try await promptYesNo("Do you want to import new .pkg into repo?", defaultYes: importAfterBuild) {
-            try await runMunkiimport(packagePath: outputPath)
+            try await runMunkiimport(packagePath: result.pkgPath)
         }
     }
     
@@ -647,12 +722,12 @@ struct MunkiPkg: AsyncParsableCommand {
 
         if !additionalOptions.quiet {
             if !envFileVars.isEmpty {
-                print("munkipkg: loaded \(envFileVars.count) build-time variable(s) from \(envFilePath)")
+                status("munkipkg: loaded \(envFileVars.count) build-time variable(s) from \(envFilePath)")
             } else if envExplicit {
                 printStderr("WARNING: environment file \(envFilePath) contained no variables.\n")
             }
             if !merged.systemEnvKeys.isEmpty {
-                print("munkipkg: picked up \(merged.systemEnvKeys.count) MUNKIPKG_* var(s) from system environment: \(merged.systemEnvKeys.joined(separator: ", "))")
+                status("munkipkg: picked up \(merged.systemEnvKeys.count) MUNKIPKG_* var(s) from system environment: \(merged.systemEnvKeys.joined(separator: ", "))")
             }
             // Only print the plain-text-in-pkg note when keys look secret-like.
             // For benign keys (SERVER_URL, ORG_NAME) the note would just train
@@ -795,7 +870,7 @@ struct MunkiPkg: AsyncParsableCommand {
         throw MunkiPkgError.invalidProject("No build-info file found")
     }
     
-    private func performBuild(projectURL: URL, buildInfo: BuildInfo, envVars: [String: String] = [:]) async throws -> String {
+    private func performBuild(projectURL: URL, buildInfo: BuildInfo, envVars: [String: String] = [:]) async throws -> BuildResult {
         // Create build directory
         let buildDir = projectURL.appendingPathComponent("build")
         if !FileManager.default.fileExists(atPath: buildDir.path) {
@@ -902,9 +977,7 @@ struct MunkiPkg: AsyncParsableCommand {
                    with: envVars,
                    tempDir: tempDir.path
                ) {
-                if !additionalOptions.quiet {
-                    print("munkipkg: substituted build-time variables into scripts (\(dirResult.unresolvedByScript.isEmpty ? "all placeholders resolved" : "some unresolved — see warnings"))")
-                }
+                status("munkipkg: substituted build-time variables into scripts (\(dirResult.unresolvedByScript.isEmpty ? "all placeholders resolved" : "some unresolved — see warnings"))")
                 unresolvedByScript = dirResult.unresolvedByScript
                 scriptsArgPath = dirResult.scriptsDir
             } else if buildOptions.strictEnv {
@@ -926,24 +999,23 @@ struct MunkiPkg: AsyncParsableCommand {
         }
         
         pkgbuildArgs.append(componentPackagePath)
-        
-        if !additionalOptions.quiet {
-            print("pkgbuild: Building component package...")
-        }
-        
+
+        status("pkgbuild: Building component package...")
+
         let pkgbuildResult = await runCliAsync("/usr/bin/pkgbuild", arguments: pkgbuildArgs)
-        
+
         if pkgbuildResult.exitCode != 0 {
             throw MunkiPkgError.buildFailed("pkgbuild failed: \(pkgbuildResult.stderr)")
         }
-        
-        if !additionalOptions.quiet {
-            print(pkgbuildResult.stdout, terminator: "")
-            print(pkgbuildResult.stderr, terminator: "")
-        }
-        
+
+        diagnostic(pkgbuildResult.stdout)
+        diagnostic(pkgbuildResult.stderr)
+
         var finalPackagePath = componentPackagePath
-        
+        let isSigned = buildInfo.signingInfo != nil
+        var didNotarize = false
+        var didStaple = false
+
         // Handle distribution-style packages and signing
         if buildInfo.distributionStyle == true || buildInfo.signingInfo != nil {
             let distPackageName = "Dist-\(packageName)"
@@ -956,9 +1028,7 @@ struct MunkiPkg: AsyncParsableCommand {
             
             // Add signing if specified
             if let signingInfo = buildInfo.signingInfo {
-                if !additionalOptions.quiet {
-                    print("\nmunkipkg: Adding package signing info to command")
-                }
+                status("munkipkg: Adding package signing info to command")
                 productbuildArgs.insert(contentsOf: ["--sign", signingInfo.identity], at: 0)
                 
                 // Add keychain if specified
@@ -983,34 +1053,33 @@ struct MunkiPkg: AsyncParsableCommand {
                 }
             }
             
-            if !additionalOptions.quiet {
-                print("productbuild: Creating distribution package...")
-            }
-            
+            status("productbuild: Creating distribution package...")
+
             let productbuildResult = await runCliAsync("/usr/bin/productbuild", arguments: productbuildArgs)
-            
-            // Always print output even if there's an error
-            if !additionalOptions.quiet || productbuildResult.exitCode != 0 {
-                print(productbuildResult.stdout, terminator: "")
-                print(productbuildResult.stderr, terminator: "")
-            }
-            
+
+            // Surface productbuild output as a diagnostic; force it to stderr on
+            // failure even under --quiet so the cause isn't swallowed.
             if productbuildResult.exitCode != 0 {
+                printStderr(productbuildResult.stdout)
+                printStderr(productbuildResult.stderr)
+                // A productbuild failure when signing was requested is a signing
+                // failure (distinct exit code); otherwise it's a generic build failure.
+                if isSigned {
+                    throw MunkiPkgError.signingFailed("productbuild signing failed with exit code \(productbuildResult.exitCode)")
+                }
                 throw MunkiPkgError.buildFailed("productbuild failed with exit code \(productbuildResult.exitCode)")
             }
-            
+            diagnostic(productbuildResult.stdout)
+            diagnostic(productbuildResult.stderr)
+
             // Remove component package
-            if !additionalOptions.quiet {
-                print("\nmunkipkg: Removing component package \(componentPackagePath)")
-            }
+            status("\nmunkipkg: Removing component package \(componentPackagePath)")
             try FileManager.default.removeItem(atPath: componentPackagePath)
-            
+
             // Rename distribution package
-            if !additionalOptions.quiet {
-                print("munkipkg: Renaming distribution package \(distPackagePath) to \(componentPackagePath)")
-            }
+            status("munkipkg: Renaming distribution package \(distPackagePath) to \(componentPackagePath)")
             try FileManager.default.moveItem(atPath: distPackagePath, toPath: componentPackagePath)
-            
+
             finalPackagePath = componentPackagePath
         }
         
@@ -1036,72 +1105,73 @@ struct MunkiPkg: AsyncParsableCommand {
                     notarizeArgs.append(contentsOf: ["--asc-provider", ascProvider])
                 }
             } else {
-                if !additionalOptions.quiet {
-                    print("munkipkg: Notarization info incomplete - need either keychain_profile or apple_id+team_id+password")
-                }
-                throw MunkiPkgError("Incomplete notarization authentication information")
+                throw MunkiPkgError.notarizationFailed("Notarization info incomplete - need either keychain_profile or apple_id+team_id+password")
             }
-            
+
             notarizeArgs.append("--wait")
-            
-            if !additionalOptions.quiet {
-                print("munkipkg: Uploading package to Apple notary service")
-            }
-            
+
+            status("munkipkg: Uploading package to Apple notary service")
+
             let notarizeResult = await runCliAsync("/usr/bin/xcrun", arguments: notarizeArgs)
-            
-            // Always print output
-            if !additionalOptions.quiet {
-                print(notarizeResult.stdout, terminator: "")
-                if !notarizeResult.stderr.isEmpty {
-                    print(notarizeResult.stderr, terminator: "")
-                }
-            }
-            
+
             // Check if notarization was successful by looking for "Accepted" status
-            let notarizationSucceeded = notarizeResult.exitCode == 0 && 
+            let notarizationSucceeded = notarizeResult.exitCode == 0 &&
                                         notarizeResult.stdout.contains("status: Accepted")
-            
-            if notarizeResult.exitCode != 0 {
-                if !additionalOptions.quiet {
-                    print("munkipkg: Notarization submission failed")
+
+            // On any failure, surface notarytool output to stderr (even under --quiet)
+            // and fail the build. A package that declares notarization but didn't
+            // notarize must never exit 0 — that's the silent-failure CI footgun.
+            if !notarizationSucceeded {
+                printStderr(notarizeResult.stdout)
+                if !notarizeResult.stderr.isEmpty {
+                    printStderr(notarizeResult.stderr)
                 }
-            } else if !notarizationSucceeded {
-                if !additionalOptions.quiet {
-                    print("munkipkg: Notarization completed but package was not accepted")
-                    if notarizeResult.stdout.contains("status: Invalid") {
-                        print("munkipkg: Package notarization returned Invalid status")
-                    }
+                if notarizeResult.exitCode != 0 {
+                    throw MunkiPkgError.notarizationFailed("Notarization submission failed (notarytool exit code \(notarizeResult.exitCode))")
                 }
-            } else {
-                if !additionalOptions.quiet {
-                    print("munkipkg: Successfully received submission info")
+                if notarizeResult.stdout.contains("status: Invalid") {
+                    throw MunkiPkgError.notarizationFailed("Package notarization returned Invalid status")
                 }
-                
-                // Staple if not skipped and notarization was successful
-                if !buildOptions.skipStapling {
-                    if !additionalOptions.quiet {
-                        print("munkipkg: Stapling package")
-                    }
-                    
-                    let stapleResult = await runCliAsync("/usr/bin/xcrun", arguments: [
-                        "stapler", "staple", finalPackagePath
-                    ])
-                    
-                    if stapleResult.exitCode == 0 {
-                        if !additionalOptions.quiet {
-                            print("munkipkg: The staple and validate action worked!")
-                        }
-                    } else {
-                        if !additionalOptions.quiet {
-                            print("munkipkg: Stapling failed: \(stapleResult.stderr)")
-                        }
-                    }
+                throw MunkiPkgError.notarizationFailed("Notarization completed but package was not accepted")
+            }
+
+            diagnostic(notarizeResult.stdout)
+            diagnostic(notarizeResult.stderr)
+            status("munkipkg: Successfully received submission info")
+            didNotarize = true
+
+            // Staple unless explicitly skipped. A staple failure also fails the build:
+            // an un-stapled package can't validate offline, so a green build that
+            // didn't staple is misleading in a pipeline.
+            if !buildOptions.skipStapling {
+                status("munkipkg: Stapling package")
+
+                let stapleResult = await runCliAsync("/usr/bin/xcrun", arguments: [
+                    "stapler", "staple", finalPackagePath
+                ])
+
+                if stapleResult.exitCode == 0 {
+                    status("munkipkg: The staple and validate action worked!")
+                    didStaple = true
+                } else {
+                    printStderr(stapleResult.stdout)
+                    printStderr(stapleResult.stderr)
+                    throw MunkiPkgError.notarizationFailed("Stapling failed (stapler exit code \(stapleResult.exitCode))")
                 }
             }
         }
-        
-        return finalPackagePath
+
+        let digest = try sha256(ofFileAt: finalPackagePath)
+        return BuildResult(
+            name: buildInfo.name,
+            version: buildInfo.version,
+            identifier: buildInfo.identifier,
+            pkgPath: finalPackagePath,
+            sha256: digest,
+            signed: isSigned,
+            notarized: didNotarize,
+            stapled: didStaple
+        )
     }
     
     private func exportBom(for projectURL: URL, buildInfo: BuildInfo) async throws {
@@ -1112,7 +1182,7 @@ struct MunkiPkg: AsyncParsableCommand {
         
         if result.exitCode == 0 {
             try result.stdout.write(toFile: bomPath, atomically: true, encoding: String.Encoding.utf8)
-            print("BOM info exported to: \(bomPath)")
+            status("BOM info exported to: \(bomPath)")
         }
     }
     
