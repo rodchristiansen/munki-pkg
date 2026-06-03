@@ -1277,7 +1277,7 @@ struct MunkiPkg: AsyncParsableCommand {
             }
             let remote = runGitProbe(["-C", projectURL.path, "remote", "get-url", "origin"])
             if remote.exitCode == 0 {
-                gitRemote = remote.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                gitRemote = Self.sanitizedRemoteURL(remote.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
             }
         }
 
@@ -1298,8 +1298,23 @@ struct MunkiPkg: AsyncParsableCommand {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(provenance)
         let sidecarPath = packagePath + ".provenance.json"
-        try data.write(to: URL(fileURLWithPath: sidecarPath))
+        // Atomic write so an interrupted run or full disk can't leave a partial
+        // JSON sidecar next to an otherwise-valid package.
+        try data.write(to: URL(fileURLWithPath: sidecarPath), options: .atomic)
         status("munkipkg: wrote provenance to \(sidecarPath)")
+    }
+
+    /// Strip any `user:pass@` userinfo from a remote URL so credentials embedded in
+    /// the origin URL never get persisted into the provenance sidecar. Non-URL
+    /// remotes (scp-style `git@host:path`, local paths) are returned unchanged.
+    private static func sanitizedRemoteURL(_ remote: String) -> String {
+        guard let schemeRange = remote.range(of: "://") else { return remote }
+        let afterScheme = schemeRange.upperBound
+        guard let atIndex = remote[afterScheme...].firstIndex(of: "@") else { return remote }
+        // Only treat it as userinfo if the '@' precedes the first '/' of the path.
+        let pathStart = remote[afterScheme...].firstIndex(of: "/") ?? remote.endIndex
+        guard atIndex < pathStart else { return remote }
+        return String(remote[..<afterScheme]) + String(remote[remote.index(after: atIndex)...])
     }
 
     /// A digest over the build inputs: the build-info file plus every file under
@@ -1309,10 +1324,14 @@ struct MunkiPkg: AsyncParsableCommand {
         var lines: [String] = []
         let fm = FileManager.default
 
+        // Hash only the build-info file actually used for the build (same
+        // plist > json > yaml precedence as loadBuildInfo), so an ignored
+        // second build-info file can't perturb the digest.
         for buildInfoName in ["build-info.plist", "build-info.json", "build-info.yaml"] {
             let path = projectURL.appendingPathComponent(buildInfoName).path
             if fm.fileExists(atPath: path) {
                 lines.append("\(buildInfoName):\(try sha256(ofFileAt: path))")
+                break
             }
         }
 

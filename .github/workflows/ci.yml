@@ -1,5 +1,5 @@
-# Runs the test suite on every push and pull request so changes are gated by
-# `make test`. Build is exercised implicitly (make test depends on a compile).
+# Runs a release build and the test suite on every push to main and on every
+# pull request, so changes are gated by `make release` and `make test`.
 
 name: CI
 

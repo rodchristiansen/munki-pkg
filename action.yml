@@ -58,7 +58,7 @@ runs:
           url="https://github.com/$repo/releases/download/$MUNKIPKG_VERSION/munkipkg"
         fi
         runner_tmp="${RUNNER_TEMP:-/tmp}"
-        curl -fsSL -o "$runner_tmp/munkipkg" "$url"
+        curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors -o "$runner_tmp/munkipkg" "$url"
         chmod +x "$runner_tmp/munkipkg"
         echo "$runner_tmp" >> "$GITHUB_PATH"
         "$runner_tmp/munkipkg" --version
@@ -81,16 +81,19 @@ runs:
         EXTRA_ARGS: ${{ inputs.extra-args }}
       run: |
         set -euo pipefail
-        args=(--build --no-import --output-format json --output-dir "$OUTPUT_DIR")
+        # extra-args first so the action's required flags (json output, output-dir)
+        # always win and can't be overridden into a shape that breaks jq parsing.
+        args=()
+        if [ -n "$EXTRA_ARGS" ]; then
+          read -ra extra <<< "$EXTRA_ARGS"
+          args+=("${extra[@]}")
+        fi
+        args+=(--build --no-import --output-format json --output-dir "$OUTPUT_DIR")
         if [ -n "$PKG_VERSION" ]; then
           args+=(--pkg-version "$PKG_VERSION")
         fi
         if [ "$DO_VERIFY" = "true" ]; then
           args+=(--verify)
-        fi
-        if [ -n "$EXTRA_ARGS" ]; then
-          read -ra extra <<< "$EXTRA_ARGS"
-          args+=("${extra[@]}")
         fi
         result="$(munkipkg "${args[@]}" "$PROJECT_PATH")"
         echo "$result"
