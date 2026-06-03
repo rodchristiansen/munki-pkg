@@ -665,6 +665,20 @@ This repo ships a composite action so other workflows can build a package projec
 
 Inputs: `project-path` (required), `version`, `output-dir` (default `dist`), `munkipkg-version` (release tag or `latest`), `lint`, `verify`, and `extra-args`. Outputs: `pkg-path`, `version`, `sha256`.
 
+### Release artifacts and verification
+
+Each release publishes the `munkipkg` binary alongside a `SHA256SUMS` file, so you can verify what you downloaded. This example fetches the most recent release:
+
+```bash
+curl -fsSLO https://github.com/rodchristiansen/munki-pkg/releases/latest/download/munkipkg
+curl -fsSLO https://github.com/rodchristiansen/munki-pkg/releases/latest/download/SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+```
+
+To pin a specific version, replace `latest/download` with `download/<tag>`, e.g. `download/2026.06.02.0924/munkipkg`.
+
+The release workflow can Developer ID sign and notarize the binary when the appropriate secrets are configured (see the comments at the top of `.github/workflows/release.yml`), but those are opt-in: with no signing secrets present it publishes an ad-hoc-signed binary plus checksums. Because the binary is fetched over `curl` rather than a browser download, it carries no quarantine flag and runs without a Gatekeeper prompt regardless.
+
 ## Important git notes
 
 Git was designed to track source code. Its focus is tracking changes in the contents of files. It's not a perfect fit for tracking the parts making up a package. Specifically, git doesn't track owner or group of files or directories, and does not track any mode bits except for the execute bit for the owner. Git also does not track empty directories.
