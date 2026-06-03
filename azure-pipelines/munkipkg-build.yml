@@ -74,16 +74,24 @@ steps:
 
   - bash: |
       set -euo pipefail
-      args=(--build --no-import --output-format json --output-dir "$OUTPUT_DIR")
-      if [ -n "$PKG_VERSION" ]; then
-        args+=(--pkg-version "$PKG_VERSION")
+      if ! command -v jq >/dev/null 2>&1; then
+        echo "##vso[task.logissue type=error]jq is required to parse the build manifest but was not found on this agent. Install jq (e.g. 'brew install jq')."
+        exit 1
       fi
-      if [ "$DO_VERIFY" = "True" ]; then
-        args+=(--verify)
-      fi
+      # extra-args first so the template's required flags always win and can't be
+      # overridden into a shape that breaks jq parsing.
+      args=()
       if [ -n "$EXTRA_ARGS" ]; then
         read -ra extra <<< "$EXTRA_ARGS"
         args+=("${extra[@]}")
+      fi
+      args+=(--build --no-import --output-format json --output-dir "$OUTPUT_DIR")
+      if [ -n "$PKG_VERSION" ]; then
+        args+=(--pkg-version "$PKG_VERSION")
+      fi
+      # Azure renders booleans as True/False; accept any case.
+      if [ "$(echo "$DO_VERIFY" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+        args+=(--verify)
       fi
       result="$(munkipkg "${args[@]}" "$PROJECT_PATH")"
       echo "$result"
