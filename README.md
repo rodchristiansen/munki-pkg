@@ -580,7 +580,19 @@ Causes munkipkg to suppress progress and status messages. Errors and warnings ar
 Skips the post-build prompt to import the package into a Munki repo with `munkiimport`. Use this in automation and CI/CD pipelines where no interactive terminal is available.
 
 `--output-format`  
-Selects the format of the build result printed to **stdout**: `text` (default, a human-readable summary line) or `json` (a machine-readable build manifest). Only valid with `--build`. Implies `--no-import`. See [**Continuous integration**](#continuous-integration) below.
+Selects the format of the result printed to **stdout**: `text` (default, a human-readable summary line) or `json` (a machine-readable manifest). Valid with `--build` (build manifest) and `--lint` (lint report). With `--build` it implies `--no-import`. See [**Continuous integration**](#continuous-integration) below.
+
+`--pkg-version`  
+Overrides the `version` from build-info for this build. Lets the version come from a git tag or CI variable instead of being committed to the project. Resolved before `${version}` substitution, so a `${version}` placeholder in the package `name` picks up the override. Only valid with `--build`.
+
+`--output-dir`  
+Writes the built package to the given directory instead of the project's `build/` directory. The directory is created if it does not exist. Only valid with `--build`.
+
+`--lint`  
+Validates the package project without building it: checks that build-info has a name, identifier, and version; that `signing_info`/`notarization_info` are internally coherent; and that scripts are executable and carry a `#!` shebang. Prints a report and exits non-zero (3) if any error is found. Pair with `--output-format json` for a machine-readable report. Ideal as a fast pre-build gate in PR CI.
+
+`--verify`  
+After a successful build, verifies the package matches what build-info declared: when signing was requested, asserts a signature is present (`pkgutil --check-signature`); when notarization succeeded, asserts the package passes Gatekeeper assessment (`spctl -a -t install`). Fails the build (exit 6 or 7) on mismatch. Only valid with `--build`.
 
 `--help`, `--version`  
 Prints help message and tool version, respectively.
