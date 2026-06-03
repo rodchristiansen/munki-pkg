@@ -92,7 +92,7 @@ struct BuildOptions: ParsableArguments {
     var noSystemEnv = false
 
     @Option(name: .customLong("output-format"),
-            help: "Format for the build result printed to stdout: 'text' (default, human-readable summary) or 'json' (machine-readable build manifest for CI). All progress and diagnostics go to stderr. Implies --no-import.")
+            help: "Format for the result printed to stdout: 'text' (default, human-readable summary) or 'json' (machine-readable report for CI). Valid with --build (build manifest) and --lint (lint report). All progress and diagnostics go to stderr. With --build it implies --no-import.")
     var outputFormat: OutputFormat = .text
 
     @Option(name: .customLong("pkg-version"),

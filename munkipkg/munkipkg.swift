@@ -131,6 +131,15 @@ struct MunkiPkg: AsyncParsableCommand {
             throw ValidationError("--output-format only valid with --build or --lint")
         }
 
+        // Reject empty/whitespace values that would otherwise fail with a less
+        // clear error deeper in the build (or target an unintended path).
+        if let pkgVersion = buildOptions.pkgVersion, pkgVersion.trimmingCharacters(in: .whitespaces).isEmpty {
+            throw ValidationError("--pkg-version must not be empty")
+        }
+        if let outputDir = buildOptions.outputDir, outputDir.trimmingCharacters(in: .whitespaces).isEmpty {
+            throw ValidationError("--output-dir must not be empty")
+        }
+
         // action is not create or import
         if !actionOptions.create && actionOptions.importPath == nil {
             // check for options that only apply to create or import
@@ -1313,8 +1322,18 @@ struct MunkiPkg: AsyncParsableCommand {
         }
 
         // Scripts must be executable and have a shebang, or pkgbuild won't run them.
+        // A missing scripts/ directory is fine; one that exists but can't be read
+        // is an error, so lint doesn't report a false OK with checks skipped.
         let scriptsURL = projectURL.appendingPathComponent("scripts")
-        if let scriptNames = try? FileManager.default.contentsOfDirectory(atPath: scriptsURL.path) {
+        var scriptsIsDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: scriptsURL.path, isDirectory: &scriptsIsDir), scriptsIsDir.boolValue {
+            let scriptNames: [String]
+            do {
+                scriptNames = try FileManager.default.contentsOfDirectory(atPath: scriptsURL.path)
+            } catch {
+                errors.append("scripts/: could not be read (\(error.localizedDescription))")
+                scriptNames = []
+            }
             for name in scriptNames.sorted() where !name.hasPrefix(".") {
                 let scriptPath = scriptsURL.appendingPathComponent(name).path
                 var isDir: ObjCBool = false
