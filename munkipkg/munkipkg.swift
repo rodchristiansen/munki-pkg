@@ -427,10 +427,12 @@ struct MunkiPkg: AsyncParsableCommand {
         case .json:
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-            let data = try encoder.encode(result)
-            if let string = String(data: data, encoding: .utf8) {
-                print(string)
-            }
+            // Write the encoder's UTF-8 output straight to stdout (plus a trailing
+            // newline) so a manifest is always emitted — no Data→String round-trip
+            // that could silently drop the result.
+            var data = try encoder.encode(result)
+            data.append(0x0A)
+            FileHandle.standardOutput.write(data)
         case .text:
             print("Package built successfully: \(result.pkgPath)")
         }
@@ -720,21 +722,21 @@ struct MunkiPkg: AsyncParsableCommand {
         let envFileVars = try EnvLoader.load(from: envFilePath)
         let merged = EnvLoader.merge(envFileVars: envFileVars, includeSysEnv: !buildOptions.noSystemEnv)
 
-        if !additionalOptions.quiet {
-            if !envFileVars.isEmpty {
-                status("munkipkg: loaded \(envFileVars.count) build-time variable(s) from \(envFilePath)")
-            } else if envExplicit {
-                printStderr("WARNING: environment file \(envFilePath) contained no variables.\n")
-            }
-            if !merged.systemEnvKeys.isEmpty {
-                status("munkipkg: picked up \(merged.systemEnvKeys.count) MUNKIPKG_* var(s) from system environment: \(merged.systemEnvKeys.joined(separator: ", "))")
-            }
-            // Only print the plain-text-in-pkg note when keys look secret-like.
-            // For benign keys (SERVER_URL, ORG_NAME) the note would just train
-            // users to ignore it.
-            if Self.containsSecretLikeKey(merged.vars.keys) {
-                printStderr("NOTE: one or more variable names look secret-like (KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL). Substituted values end up as plain text inside the built .pkg — anyone with the package can read them via `pkgutil --expand`. Use this mechanism for build-time configuration only; fetch real secrets at runtime from Keychain or an MDM-delivered profile.\n")
-            }
+        // Informational lines self-quiet via status(); warnings and the secret-like
+        // NOTE are emitted regardless of --quiet, which only suppresses progress.
+        if !envFileVars.isEmpty {
+            status("munkipkg: loaded \(envFileVars.count) build-time variable(s) from \(envFilePath)")
+        } else if envExplicit {
+            printStderr("WARNING: environment file \(envFilePath) contained no variables.\n")
+        }
+        if !merged.systemEnvKeys.isEmpty {
+            status("munkipkg: picked up \(merged.systemEnvKeys.count) MUNKIPKG_* var(s) from system environment: \(merged.systemEnvKeys.joined(separator: ", "))")
+        }
+        // Only print the plain-text-in-pkg note when keys look secret-like.
+        // For benign keys (SERVER_URL, ORG_NAME) the note would just train
+        // users to ignore it.
+        if Self.containsSecretLikeKey(merged.vars.keys) {
+            printStderr("NOTE: one or more variable names look secret-like (KEY/TOKEN/SECRET/PASSWORD/CREDENTIAL). Substituted values end up as plain text inside the built .pkg — anyone with the package can read them via `pkgutil --expand`. Use this mechanism for build-time configuration only; fetch real secrets at runtime from Keychain or an MDM-delivered profile.\n")
         }
 
         // Warn if a .env file exists in the project at all, regardless of whether
@@ -1163,7 +1165,9 @@ struct MunkiPkg: AsyncParsableCommand {
 
         let digest = try sha256(ofFileAt: finalPackagePath)
         return BuildResult(
-            name: buildInfo.name,
+            // Report the actual artifact filename so `name` always agrees with
+            // `pkg_path` (the build path may append a missing .pkg extension).
+            name: (finalPackagePath as NSString).lastPathComponent,
             version: buildInfo.version,
             identifier: buildInfo.identifier,
             pkgPath: finalPackagePath,
