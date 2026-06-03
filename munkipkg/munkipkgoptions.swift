@@ -8,6 +8,13 @@
 import ArgumentParser
 import Foundation
 
+/// Format for the build result printed to stdout. Progress and diagnostics
+/// always go to stderr regardless of this setting.
+enum OutputFormat: String, ExpressibleByArgument, Sendable {
+    case text
+    case json
+}
+
 struct ActionOptions: ParsableArguments {
     @Flag(name: .long,
           help: "Build a package using the package project at <project-path>.")
@@ -78,6 +85,10 @@ struct BuildOptions: ParsableArguments {
     @Flag(name: .customLong("no-system-env"),
           help: "Do not merge MUNKIPKG_* prefixed variables from the calling process environment. By default these are merged in alongside the .env file.")
     var noSystemEnv = false
+
+    @Option(name: .customLong("output-format"),
+            help: "Format for the build result printed to stdout: 'text' (default, human-readable summary) or 'json' (machine-readable build manifest for CI). All progress and diagnostics go to stderr. Implies --no-import.")
+    var outputFormat: OutputFormat = .text
 }
 
 struct CreateAndImportOptions: ParsableArguments {

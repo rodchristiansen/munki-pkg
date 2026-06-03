@@ -45,5 +45,13 @@ extension MunkiPkgError {
     static func buildFailed(_ description: String) -> MunkiPkgError {
         return MunkiPkgError(description, exitCode: 5)
     }
+
+    static func signingFailed(_ description: String) -> MunkiPkgError {
+        return MunkiPkgError(description, exitCode: 6)
+    }
+
+    static func notarizationFailed(_ description: String) -> MunkiPkgError {
+        return MunkiPkgError(description, exitCode: 7)
+    }
 }
 
