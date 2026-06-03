@@ -594,6 +594,9 @@ Validates the package project without building it: checks that build-info has a 
 `--verify`  
 After a successful build, verifies the package matches what build-info declared: when signing was requested, asserts a signature is present (`pkgutil --check-signature`); when notarization succeeded, asserts the package passes Gatekeeper assessment (`spctl -a -t install`). Fails the build (exit 6 or 7) on mismatch. Only valid with `--build`.
 
+`--provenance`  
+After building, writes a `<package>.provenance.json` sidecar next to the package recording the tool version, build time, the source git commit and remote (when the project is in a git work tree), an `input_sha256` digest over build-info plus the payload and scripts, and the package `pkg_sha256`. Useful for supply-chain attestation. Only valid with `--build`.
+
 `--help`, `--version`  
 Prints help message and tool version, respectively.
 
@@ -643,6 +646,24 @@ When build-info declares signing or notarization, a failure in that step fails t
 | 6 | Signing failed |
 | 7 | Notarization or stapling failed |
 | 64 | Invalid command-line usage |
+
+### GitHub Actions
+
+This repo ships a composite action so other workflows can build a package project without scripting the install-and-invoke dance. It downloads the munkipkg release binary, optionally lints, builds with `--output-format json`, and exposes the result as step outputs.
+
+```yaml
+- uses: rodchristiansen/munki-pkg@main
+  id: pkg
+  with:
+    project-path: packages/my-package-project
+    version: ${{ github.ref_name }}
+    output-dir: dist
+    lint: 'true'
+
+- run: echo "Built ${{ steps.pkg.outputs.pkg-path }} (${{ steps.pkg.outputs.sha256 }})"
+```
+
+Inputs: `project-path` (required), `version`, `output-dir` (default `dist`), `munkipkg-version` (release tag or `latest`), `lint`, `verify`, and `extra-args`. Outputs: `pkg-path`, `version`, `sha256`.
 
 ## Important git notes
 

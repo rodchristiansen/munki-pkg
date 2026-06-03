@@ -124,6 +124,9 @@ struct MunkiPkg: AsyncParsableCommand {
             if buildOptions.verify {
                 throw ValidationError("--verify only valid with --build")
             }
+            if buildOptions.provenance {
+                throw ValidationError("--provenance only valid with --build")
+            }
         }
 
         // --output-format produces a result report; it applies to --build and --lint.
@@ -1209,6 +1212,11 @@ struct MunkiPkg: AsyncParsableCommand {
         }
 
         let digest = try sha256(ofFileAt: finalPackagePath)
+
+        if buildOptions.provenance {
+            try writeProvenance(packagePath: finalPackagePath, projectURL: projectURL, buildInfo: buildInfo, pkgSha256: digest)
+        }
+
         return BuildResult(
             // Report the actual artifact filename so `name` always agrees with
             // `pkg_path` (the build path may append a missing .pkg extension).
@@ -1221,6 +1229,129 @@ struct MunkiPkg: AsyncParsableCommand {
             notarized: didNotarize,
             stapled: didStaple
         )
+    }
+
+    // MARK: - Provenance
+
+    /// Supply-chain attestation written alongside the package as
+    /// `<package>.provenance.json`. Records what was built, from which source, and
+    /// with which tool, so a downstream consumer can tie a package back to its inputs.
+    private struct Provenance: Codable {
+        let tool: String
+        let toolVersion: String
+        let builtAt: String
+        let name: String
+        let identifier: String
+        let version: String
+        let pkgSha256: String
+        let inputSha256: String
+        let gitCommit: String?
+        let gitRemote: String?
+
+        enum CodingKeys: String, CodingKey {
+            case tool
+            case toolVersion = "tool_version"
+            case builtAt = "built_at"
+            case name
+            case identifier
+            case version
+            case pkgSha256 = "pkg_sha256"
+            case inputSha256 = "input_sha256"
+            case gitCommit = "git_commit"
+            case gitRemote = "git_remote"
+        }
+    }
+
+    private func writeProvenance(packagePath: String, projectURL: URL, buildInfo: BuildInfo, pkgSha256: String) throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+
+        // Capture the source revision when the project lives in a git work tree.
+        var gitCommit: String?
+        var gitRemote: String?
+        let revParse = runGitProbe(["-C", projectURL.path, "rev-parse", "--is-inside-work-tree"])
+        if revParse.exitCode == 0, revParse.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "true" {
+            let head = runGitProbe(["-C", projectURL.path, "rev-parse", "HEAD"])
+            if head.exitCode == 0 {
+                gitCommit = head.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let remote = runGitProbe(["-C", projectURL.path, "remote", "get-url", "origin"])
+            if remote.exitCode == 0 {
+                gitRemote = Self.sanitizedRemoteURL(remote.stdout.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+        }
+
+        let provenance = Provenance(
+            tool: "munkipkg",
+            toolVersion: VERSION,
+            builtAt: formatter.string(from: Date()),
+            name: buildInfo.name,
+            identifier: buildInfo.identifier,
+            version: buildInfo.version,
+            pkgSha256: pkgSha256,
+            inputSha256: try inputDigest(for: projectURL),
+            gitCommit: gitCommit,
+            gitRemote: gitRemote
+        )
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(provenance)
+        let sidecarPath = packagePath + ".provenance.json"
+        // Atomic write so an interrupted run or full disk can't leave a partial
+        // JSON sidecar next to an otherwise-valid package.
+        try data.write(to: URL(fileURLWithPath: sidecarPath), options: .atomic)
+        status("munkipkg: wrote provenance to \(sidecarPath)")
+    }
+
+    /// Strip any `user:pass@` userinfo from a remote URL so credentials embedded in
+    /// the origin URL never get persisted into the provenance sidecar. Non-URL
+    /// remotes (scp-style `git@host:path`, local paths) are returned unchanged.
+    private static func sanitizedRemoteURL(_ remote: String) -> String {
+        guard let schemeRange = remote.range(of: "://") else { return remote }
+        let afterScheme = schemeRange.upperBound
+        guard let atIndex = remote[afterScheme...].firstIndex(of: "@") else { return remote }
+        // Only treat it as userinfo if the '@' precedes the first '/' of the path.
+        let pathStart = remote[afterScheme...].firstIndex(of: "/") ?? remote.endIndex
+        guard atIndex < pathStart else { return remote }
+        return String(remote[..<afterScheme]) + String(remote[remote.index(after: atIndex)...])
+    }
+
+    /// A digest over the build inputs: the build-info file plus every file under
+    /// payload/ and scripts/, each hashed and keyed by its project-relative path.
+    /// Sorted so the result is stable regardless of enumeration order.
+    private func inputDigest(for projectURL: URL) throws -> String {
+        var lines: [String] = []
+        let fm = FileManager.default
+
+        // Hash only the build-info file actually used for the build (same
+        // plist > json > yaml precedence as loadBuildInfo), so an ignored
+        // second build-info file can't perturb the digest.
+        for buildInfoName in ["build-info.plist", "build-info.json", "build-info.yaml"] {
+            let path = projectURL.appendingPathComponent(buildInfoName).path
+            if fm.fileExists(atPath: path) {
+                lines.append("\(buildInfoName):\(try sha256(ofFileAt: path))")
+                break
+            }
+        }
+
+        for subdir in ["payload", "scripts"] {
+            let dirURL = projectURL.appendingPathComponent(subdir)
+            guard let enumerator = fm.enumerator(at: dirURL, includingPropertiesForKeys: [.isRegularFileKey]) else {
+                continue
+            }
+            for case let fileURL as URL in enumerator {
+                let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey])
+                guard values?.isRegularFile == true else { continue }
+                let relative = String(fileURL.path.dropFirst(projectURL.path.count + 1))
+                lines.append("\(relative):\(try sha256(ofFileAt: fileURL.path))")
+            }
+        }
+
+        let manifest = lines.sorted().joined(separator: "\n")
+        var hasher = SHA256()
+        hasher.update(data: Data(manifest.utf8))
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
     
     private func exportBom(for projectURL: URL, buildInfo: BuildInfo) async throws {
