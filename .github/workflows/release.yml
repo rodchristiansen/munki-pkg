@@ -118,7 +118,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          AUTO_NOTES=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$VERSION" -f target_commitish="$GITHUB_SHA" --jq .body)
+          AUTO_NOTES=$(printf '%s\n' "$AUTO_NOTES" | sed -E -e 's/ by @[A-Za-z0-9_-]+ in / in /g' -e '/^#+ New Contributors/d' -e '/made their first contribution/d')
           gh release create "$VERSION" dist/munkipkg dist/SHA256SUMS \
             --title "$VERSION" \
             --target "$GITHUB_SHA" \
-            --generate-notes
+            --notes "$AUTO_NOTES"
