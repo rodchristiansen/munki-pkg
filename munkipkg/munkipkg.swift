@@ -124,6 +124,9 @@ struct MunkiPkg: AsyncParsableCommand {
             if buildOptions.verify {
                 throw ValidationError("--verify only valid with --build")
             }
+            if buildOptions.verifyJson != nil {
+                throw ValidationError("--verify-json only valid with --build")
+            }
             if buildOptions.provenance {
                 throw ValidationError("--provenance only valid with --build")
             }
@@ -141,6 +144,9 @@ struct MunkiPkg: AsyncParsableCommand {
         }
         if let outputDir = buildOptions.outputDir, outputDir.trimmingCharacters(in: .whitespaces).isEmpty {
             throw ValidationError("--output-dir must not be empty")
+        }
+        if let verifyJson = buildOptions.verifyJson, verifyJson.trimmingCharacters(in: .whitespaces).isEmpty {
+            throw ValidationError("--verify-json must not be empty")
         }
 
         // action is not create or import
@@ -1206,9 +1212,18 @@ struct MunkiPkg: AsyncParsableCommand {
             status("munkipkg: moved package to \(dest.path)")
         }
 
-        // Verify the built package matches what build-info declared.
-        if buildOptions.verify {
-            try await verifyPackage(at: finalPackagePath, signed: isSigned, notarized: didNotarize)
+        // Verify the built package matches what build-info declared. A report path
+        // implies verification even when --verify was not passed on its own.
+        if buildOptions.verify || buildOptions.verifyJson != nil {
+            let report = await verifyPackage(at: finalPackagePath, signed: isSigned, notarized: didNotarize)
+            // Persist the report before failing, so a failing verify still leaves the
+            // evidence on disk for archiving or client documentation.
+            if let reportPath = buildOptions.verifyJson {
+                try writeVerifyReport(report, to: reportPath)
+            }
+            if let failure = report.firstFailure {
+                throw failure
+            }
         }
 
         let digest = try sha256(ofFileAt: finalPackagePath)
@@ -1368,32 +1383,131 @@ struct MunkiPkg: AsyncParsableCommand {
 
     // MARK: - Verify
 
+    /// A single post-build verification check (signature or Gatekeeper), captured so
+    /// the outcome can be both acted on and written to a `--verify-report` file.
+    private struct VerifyCheck: Codable {
+        let name: String
+        let command: String
+        let exitCode: Int
+        let passed: Bool
+        let output: String
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case command
+            case exitCode = "exit_code"
+            case passed
+            case output
+        }
+    }
+
+    /// The result of a `--verify` run. `ok` is stored (not computed) so it is emitted
+    /// in the JSON report; `firstFailure` maps a failing check back to the same error
+    /// the build would have thrown so exit codes and messages stay unchanged.
+    private struct VerifyReport: Codable {
+        let ok: Bool
+        let package: String
+        let verifiedAt: String
+        let checks: [VerifyCheck]
+
+        init(package: String, verifiedAt: String, checks: [VerifyCheck]) {
+            self.ok = checks.allSatisfy { $0.passed }
+            self.package = package
+            self.verifiedAt = verifiedAt
+            self.checks = checks
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case ok
+            case package
+            case verifiedAt = "verified_at"
+            case checks
+        }
+
+        var firstFailure: MunkiPkgError? {
+            for check in checks where !check.passed {
+                switch check.name {
+                case "gatekeeper":
+                    return .notarizationFailed("--verify: package failed Gatekeeper assessment (spctl exit code \(check.exitCode))")
+                default:
+                    return .signingFailed("--verify: package signature check failed (pkgutil exit code \(check.exitCode))")
+                }
+            }
+            return nil
+        }
+    }
+
     /// Assert the built package matches what build-info declared. When signing was
     /// requested, the package must carry a signature; when notarization succeeded,
-    /// the package must pass Gatekeeper's install assessment. Either mismatch fails
-    /// the build with the matching exit code.
-    private func verifyPackage(at packagePath: String, signed: Bool, notarized: Bool) async throws {
+    /// the package must pass Gatekeeper's install assessment. Collects the outcome of
+    /// each check into a report; the caller decides whether to persist it and/or fail.
+    private func verifyPackage(at packagePath: String, signed: Bool, notarized: Bool) async -> VerifyReport {
+        var checks: [VerifyCheck] = []
+
         if signed {
             status("munkipkg: verifying package signature")
             let sig = await runCliAsync("/usr/sbin/pkgutil", arguments: ["--check-signature", packagePath])
-            if sig.exitCode != 0 {
+            let passed = sig.exitCode == 0
+            checks.append(VerifyCheck(
+                name: "signature",
+                command: "pkgutil --check-signature",
+                exitCode: sig.exitCode,
+                passed: passed,
+                output: Self.combinedOutput(sig.stdout, sig.stderr)
+            ))
+            if passed {
+                diagnostic(sig.stdout)
+            } else {
                 printStderr(sig.stdout)
                 printStderr(sig.stderr)
-                throw MunkiPkgError.signingFailed("--verify: package signature check failed (pkgutil exit code \(sig.exitCode))")
             }
-            diagnostic(sig.stdout)
         }
 
         if notarized {
             status("munkipkg: verifying Gatekeeper assessment")
             let assess = await runCliAsync("/usr/sbin/spctl", arguments: ["-a", "-vvv", "-t", "install", packagePath])
-            if assess.exitCode != 0 {
+            let passed = assess.exitCode == 0
+            checks.append(VerifyCheck(
+                name: "gatekeeper",
+                command: "spctl -a -vvv -t install",
+                exitCode: assess.exitCode,
+                passed: passed,
+                output: Self.combinedOutput(assess.stdout, assess.stderr)
+            ))
+            if passed {
+                diagnostic(assess.stderr)
+            } else {
                 printStderr(assess.stdout)
                 printStderr(assess.stderr)
-                throw MunkiPkgError.notarizationFailed("--verify: package failed Gatekeeper assessment (spctl exit code \(assess.exitCode))")
             }
-            diagnostic(assess.stderr)
         }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return VerifyReport(
+            package: (packagePath as NSString).lastPathComponent,
+            verifiedAt: formatter.string(from: Date()),
+            checks: checks
+        )
+    }
+
+    /// Join command stdout/stderr into one trimmed block for the verify report,
+    /// dropping either stream when it is empty.
+    private static func combinedOutput(_ stdout: String, _ stderr: String) -> String {
+        [stdout, stderr]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    /// Write a verify report to `path` as JSON. Atomic so an interrupted run can't
+    /// leave a partial file next to the package.
+    private func writeVerifyReport(_ report: VerifyReport, to path: String) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(report)
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+        status("munkipkg: wrote verify report to \(path)")
     }
 
     // MARK: - Lint
