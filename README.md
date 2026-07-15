@@ -594,6 +594,9 @@ Validates the package project without building it: checks that build-info has a 
 `--verify`  
 After a successful build, verifies the package matches what build-info declared: when signing was requested, asserts a signature is present (`pkgutil --check-signature`); when notarization succeeded, asserts the package passes Gatekeeper assessment (`spctl -a -t install`). Fails the build (exit 6 or 7) on mismatch. Only valid with `--build`.
 
+`--verify-json <path>`  
+Writes the `--verify` results to a JSON file so the checks can be archived or handed to a client alongside the package: `ok`, `verified_at`, and a `checks` array with each command, exit code, and captured output. Implies `--verify`, and the report is written for both passing and failing checks — a failing verify still exits non-zero afterward. Only valid with `--build`.
+
 `--provenance`  
 After building, writes a `<package>.provenance.json` sidecar next to the package recording the tool version, build time, the source git commit and remote (when the project is in a git work tree), an `input_sha256` digest over build-info plus the payload and scripts, and the package `pkg_sha256`. Useful for supply-chain attestation. Only valid with `--build`.
 

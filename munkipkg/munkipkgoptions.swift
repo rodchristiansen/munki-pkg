@@ -107,6 +107,10 @@ struct BuildOptions: ParsableArguments {
           help: "After building, verify the package: assert a signature is present when signing was requested (pkgutil --check-signature) and that it passes Gatekeeper assessment when notarized (spctl). Fails the build on mismatch.")
     var verify = false
 
+    @Option(name: .customLong("verify-json"),
+            help: ArgumentHelp("Write the --verify results to this path as JSON, so the checks can be archived or handed to a client alongside the package. Implies --verify, and the report is written for both passing and failing checks (a failing verify still exits non-zero afterward).", valueName: "path"))
+    var verifyJson: String?
+
     @Flag(name: .long,
           help: "Write a <package>.provenance.json sidecar recording the tool version, build time, source git commit, an input digest, and the package hash. Useful for supply-chain attestation in CI.")
     var provenance = false
