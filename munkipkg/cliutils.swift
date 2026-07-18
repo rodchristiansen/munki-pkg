@@ -60,22 +60,84 @@ func checkOutput(_ tool: String,
     return result.stdout
 }
 
-/// Actor to safely accumulate process output from concurrent callbacks
-private actor ProcessOutputAccumulator {
-    var stdout: String = ""
-    var stderr: String = ""
-    
-    func appendStdout(_ text: String) {
-        stdout.append(text)
+/// Runs a command-line tool to completion, capturing stdout and stderr.
+///
+/// stdout and stderr are drained concurrently on background queues while the
+/// process runs, so a child that writes more than the ~64 KB pipe buffer to
+/// either stream can't deadlock against us (the earlier readabilityHandler +
+/// busy-wait implementation risked exactly that, and spun a CPU core hot while
+/// polling). stdin, if any, is written on its own queue for the same reason.
+/// This is the same drain-and-join pattern used by `runGitProbe`, factored so
+/// both the sync (`runCLI`) and async (`runCliAsync`) entry points share it.
+private func runCLICore(_ tool: String,
+                        arguments: [String],
+                        environment: [String: String],
+                        stdIn: String) -> CLIResults
+{
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: tool)
+    task.arguments = arguments
+    if !environment.isEmpty {
+        task.environment = environment
     }
-    
-    func appendStderr(_ text: String) {
-        stderr.append(text)
+
+    let outputPipe = Pipe()
+    let errorPipe = Pipe()
+    let inputPipe = Pipe()
+    task.standardOutput = outputPipe
+    task.standardError = errorPipe
+    task.standardInput = inputPipe
+
+    do {
+        try task.run()
+    } catch {
+        // task didn't launch — surface why instead of a bare -1
+        return CLIResults(exitCode: -1, failureDetail: "Failed to launch \(tool): \(error)")
     }
-    
-    func getOutput() -> (stdout: String, stderr: String) {
-        return (stdout, stderr)
+
+    // Hold the captured Data in a Sendable box so the concurrent reader closures
+    // can each write their own field. Every field is written exactly once by a
+    // single closure, and the parent reads only after `group.wait()`, so there is
+    // no concurrent mutation.
+    final class DataBox: @unchecked Sendable {
+        var stdout = Data()
+        var stderr = Data()
     }
+    let box = DataBox()
+    let group = DispatchGroup()
+
+    group.enter()
+    DispatchQueue.global(qos: .utility).async {
+        box.stdout = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        group.leave()
+    }
+    group.enter()
+    DispatchQueue.global(qos: .utility).async {
+        box.stderr = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        group.leave()
+    }
+
+    // Write stdin (if any) concurrently, then close so the child sees EOF.
+    let inputHandle = inputPipe.fileHandleForWriting
+    if !stdIn.isEmpty, let data = stdIn.data(using: .utf8) {
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            try? inputHandle.write(contentsOf: data)
+            try? inputHandle.close()
+            group.leave()
+        }
+    } else {
+        try? inputHandle.close()
+    }
+
+    task.waitUntilExit()
+    group.wait()
+
+    return CLIResults(
+        exitCode: Int(task.terminationStatus),
+        stdout: trimTrailingNewline(String(data: box.stdout, encoding: .utf8) ?? ""),
+        stderr: trimTrailingNewline(String(data: box.stderr, encoding: .utf8) ?? "")
+    )
 }
 
 /// a basic wrapper intended to be used just as you would runCLI, but async
@@ -84,104 +146,14 @@ func runCliAsync(_ tool: String,
                  environment: [String: String] = [:],
                  stdIn: String = "") async -> CLIResults
 {
-    let accumulator = ProcessOutputAccumulator()
-    var exitCode: Int = 0
-
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: tool)
-    task.arguments = arguments
-    if !environment.isEmpty {
-        task.environment = environment
-    }
-
-    // set up our stdout and stderr pipes and handlers
-    let outputPipe = Pipe()
-    outputPipe.fileHandleForReading.readabilityHandler = { fh in
-        let data = fh.availableData
-        if data.isEmpty { // EOF on the pipe
-            outputPipe.fileHandleForReading.readabilityHandler = nil
-        } else if let text = String(data: data, encoding: .utf8) {
-            Task {
-                await accumulator.appendStdout(text)
-            }
+    // Run the blocking core on a background queue and resume the continuation
+    // when it finishes — no busy-wait, so a long child (e.g. `notarytool --wait`)
+    // suspends the task instead of pinning a CPU core.
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global(qos: .utility).async {
+            let result = runCLICore(tool, arguments: arguments, environment: environment, stdIn: stdIn)
+            continuation.resume(returning: result)
         }
-    }
-    let errorPipe = Pipe()
-    errorPipe.fileHandleForReading.readabilityHandler = { fh in
-        let data = fh.availableData
-        if data.isEmpty { // EOF on the pipe
-            errorPipe.fileHandleForReading.readabilityHandler = nil
-        } else if let text = String(data: data, encoding: .utf8) {
-            Task {
-                await accumulator.appendStderr(text)
-            }
-        }
-    }
-    let inputPipe = Pipe()
-    inputPipe.fileHandleForWriting.writeabilityHandler = { fh in
-        if !stdIn.isEmpty {
-            if let data = stdIn.data(using: .utf8) {
-                fh.write(data)
-            }
-        }
-        fh.closeFile()
-        inputPipe.fileHandleForWriting.writeabilityHandler = nil
-    }
-    task.standardOutput = outputPipe
-    task.standardError = errorPipe
-    task.standardInput = inputPipe
-
-    do {
-        try task.run()
-    } catch {
-        // task didn't launch
-        return CLIResults(exitCode: -1)
-    }
-    
-    // Wait for process to complete
-    while task.isRunning {
-        await Task.yield()
-    }
-
-    // Wait for pipes to close
-    while outputPipe.fileHandleForReading.readabilityHandler != nil ||
-        errorPipe.fileHandleForReading.readabilityHandler != nil
-    {
-        await Task.yield()
-    }
-
-    exitCode = Int(task.terminationStatus)
-
-    let output = await accumulator.getOutput()
-    return CLIResults(
-        exitCode: exitCode,
-        stdout: trimTrailingNewline(output.stdout),
-        stderr: trimTrailingNewline(output.stderr)
-    )
-}
-
-/// Thread-safe accumulator using locks for synchronous CLI
-private final class SynchronousOutputAccumulator: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _stdout: String = ""
-    private var _stderr: String = ""
-    
-    func appendStdout(_ text: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        _stdout.append(text)
-    }
-    
-    func appendStderr(_ text: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        _stderr.append(text)
-    }
-    
-    func getOutput() -> (stdout: String, stderr: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        return (_stdout, _stderr)
     }
 }
 
@@ -191,75 +163,5 @@ func runCLI(_ tool: String,
             environment: [String: String] = [:],
             stdIn: String = "") -> CLIResults
 {
-    let accumulator = SynchronousOutputAccumulator()
-    var exitCode: Int = 0
-
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: tool)
-    task.arguments = arguments
-    if !environment.isEmpty {
-        task.environment = environment
-    }
-
-    // set up our stdout and stderr pipes and handlers
-    let outputPipe = Pipe()
-    outputPipe.fileHandleForReading.readabilityHandler = { fh in
-        let data = fh.availableData
-        if data.isEmpty { // EOF on the pipe
-            outputPipe.fileHandleForReading.readabilityHandler = nil
-        } else if let text = String(data: data, encoding: .utf8) {
-            accumulator.appendStdout(text)
-        }
-    }
-    let errorPipe = Pipe()
-    errorPipe.fileHandleForReading.readabilityHandler = { fh in
-        let data = fh.availableData
-        if data.isEmpty { // EOF on the pipe
-            errorPipe.fileHandleForReading.readabilityHandler = nil
-        } else if let text = String(data: data, encoding: .utf8) {
-            accumulator.appendStderr(text)
-        }
-    }
-    let inputPipe = Pipe()
-    inputPipe.fileHandleForWriting.writeabilityHandler = { fh in
-        if !stdIn.isEmpty {
-            if let data = stdIn.data(using: .utf8) {
-                fh.write(data)
-            }
-        }
-        fh.closeFile()
-        inputPipe.fileHandleForWriting.writeabilityHandler = nil
-    }
-    task.standardOutput = outputPipe
-    task.standardError = errorPipe
-    task.standardInput = inputPipe
-
-    do {
-        try task.run()
-    } catch {
-        // task didn't launch
-        return CLIResults(exitCode: -1)
-    }
-    
-    // task.waitUntilExit()
-    while task.isRunning {
-        // loop until process exits
-        usleep(10000)
-    }
-
-    while outputPipe.fileHandleForReading.readabilityHandler != nil ||
-        errorPipe.fileHandleForReading.readabilityHandler != nil
-    {
-        // loop until stdout and stderr pipes close
-        usleep(10000)
-    }
-
-    exitCode = Int(task.terminationStatus)
-
-    let output = accumulator.getOutput()
-    return CLIResults(
-        exitCode: exitCode,
-        stdout: trimTrailingNewline(output.stdout),
-        stderr: trimTrailingNewline(output.stderr)
-    )
+    return runCLICore(tool, arguments: arguments, environment: environment, stdIn: stdIn)
 }
